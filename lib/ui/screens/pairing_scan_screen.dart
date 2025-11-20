@@ -95,11 +95,12 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
     }
 
     final barcode = barcodes.first;
-    if (barcode.rawValue == null) {
+    final rawValue = barcode.rawValue;
+    if (rawValue == null) {
       return;
     }
 
-    final token = barcode.rawValue!.trim();
+    final token = rawValue.trim();
     _scannedToken = token;
     _joinSession(token);
   }

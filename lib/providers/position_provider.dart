@@ -17,6 +17,8 @@ class PositionNotifier extends Notifier<PositionUpdate?> {
 
   @override
   PositionUpdate? build() {
+    // Note: Position monitoring is started manually by the UI when needed
+    // This prevents the "deactivated widget" error from auto-starting in build()
     return null;
   }
 

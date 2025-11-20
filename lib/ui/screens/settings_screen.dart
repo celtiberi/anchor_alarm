@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/settings_provider.dart';
 import '../../models/app_settings.dart';
+import '../../utils/distance_formatter.dart';
 
 /// Settings screen for app configuration.
 class SettingsScreen extends ConsumerWidget {
@@ -65,15 +66,15 @@ class SettingsScreen extends ConsumerWidget {
             title: const Text('Default Anchor Radius'),
             subtitle: Slider(
               value: settings.defaultRadius,
-              min: 20,
+              min: 1,
               max: 100,
-              divisions: 16,
-              label: '${settings.defaultRadius.toStringAsFixed(0)} m',
+              divisions: 99,
+              label: formatDistanceInt(settings.defaultRadius, settings.unitSystem),
               onChanged: (value) {
                 notifier.setDefaultRadius(value);
               },
             ),
-            trailing: Text('${settings.defaultRadius.toStringAsFixed(0)} m'),
+            trailing: Text(formatDistanceInt(settings.defaultRadius, settings.unitSystem)),
           ),
           const Divider(),
 

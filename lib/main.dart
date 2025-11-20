@@ -7,6 +7,7 @@ import 'ui/screens/map_screen.dart';
 import 'providers/settings_provider.dart';
 import 'providers/notification_service_provider.dart';
 import 'services/notification_service.dart';
+import 'services/background_alarm_service.dart';
 import 'models/app_settings.dart';
 import 'utils/logger_setup.dart';
 import 'repositories/local_storage_repository.dart';
@@ -27,6 +28,10 @@ void main() async {
       // Initialize Hive boxes before app starts
       final repository = LocalStorageRepository();
       await repository.initialize();
+      
+      // Initialize background alarm service
+      final backgroundService = BackgroundAlarmService();
+      await backgroundService.initialize();
       
       runApp(
         ProviderScope(

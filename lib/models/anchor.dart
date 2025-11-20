@@ -25,8 +25,8 @@ class Anchor {
           'Longitude must be between -180 and 180, got $longitude',
         ),
         assert(
-          radius >= 20 && radius <= 100,
-          'Radius must be between 20 and 100 meters, got $radius',
+          radius >= 1 && radius <= 100,
+          'Radius must be between 1 and 100 meters, got $radius',
         ),
         assert(id.isNotEmpty, 'Anchor ID cannot be empty');
 

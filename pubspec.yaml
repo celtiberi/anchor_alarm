@@ -71,6 +71,7 @@ dependencies:
 
   # Device Info
   device_info_plus: ^10.1.2
+  flutter_background_service: ^5.1.0
 
 dev_dependencies:
   flutter_test:

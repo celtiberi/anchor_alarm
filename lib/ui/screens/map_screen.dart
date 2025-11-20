@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,11 +11,13 @@ import '../../providers/position_history_provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../models/anchor.dart';
 import '../../models/position_update.dart';
-import '../../models/app_settings.dart';
 import '../../models/alarm_event.dart';
+import '../../models/app_settings.dart';
 import '../../utils/distance_calculator.dart';
+import '../../utils/distance_formatter.dart';
 import '../../utils/logger_setup.dart';
 import '../../providers/alarm_provider.dart';
+import '../../models/position_history_point.dart';
 import 'settings_screen.dart';
 import 'pairing_screen.dart';
 
@@ -30,22 +33,36 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   final MapController _mapController = MapController();
   final GlobalKey _mapKey = GlobalKey();
   bool _isDraggingAnchor = false;
-  String? _shownAlarmId; // Track which alarm dialog has been shown
   LatLng? _displayAnchorPosition;
-  LatLng? _originalAnchorPosition;
-
+  List<LatLng>? _cachedPolygonPoints;
+  LatLng? _cachedPolygonCenter;
+  double? _cachedPolygonRadius;
+  Anchor? _previousAnchor;
+  final Set<String> _shownWarningIds = {}; // Track which warnings have been shown
+  bool _positionMonitoringStarted = false;
+  bool _isInfoCardExpanded = true; // Track if info card is expanded
+  bool _isDraggingRadius = false; // Track if radius slider is being dragged
+  double _sliderRadiusValue = 0.0; // Local state for slider value during dragging
+  
   @override
   void initState() {
     super.initState();
-    // Start position monitoring when screen loads
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(positionProvider.notifier).startMonitoring();
-    });
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+
+    // Safely start position monitoring when dependencies are available
+    if (!_positionMonitoringStarted) {
+      try {
+        ref.read(positionProvider.notifier).startMonitoring();
+        _positionMonitoringStarted = true;
+        logger.i('Started position monitoring');
+      } catch (e, stackTrace) {
+        logger.e('Failed to start position monitoring', error: e, stackTrace: stackTrace);
+      }
+    }
   }
 
   @override
@@ -55,6 +72,477 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     super.dispose();
   }
 
+  Widget _buildAlarmBanner(AlarmEvent alarm, AppSettings settings) {
+    final theme = Theme.of(context);
+    return Container(
+      color: theme.colorScheme.error,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          Icon(Icons.warning, color: theme.colorScheme.onError, size: 24),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'ANCHOR ALARM: ${alarm.type.name.toUpperCase()}',
+                  style: TextStyle(
+                    color: theme.colorScheme.onError,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+                if (alarm.type == AlarmType.driftExceeded)
+                  Text(
+                    'Drifted ${formatDistance(alarm.distanceFromAnchor, settings.unitSystem)} from anchor',
+                    style: TextStyle(color: theme.colorScheme.onError, fontSize: 12),
+                  )
+                else if (alarm.type == AlarmType.gpsLost)
+                  Text(
+                    'GPS signal lost',
+                    style: TextStyle(color: theme.colorScheme.onError, fontSize: 12),
+                  )
+                else if (alarm.type == AlarmType.gpsInaccurate)
+                  Text(
+                    'GPS accuracy poor',
+                    style: TextStyle(color: theme.colorScheme.onError, fontSize: 12),
+                  ),
+              ],
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              // Manual dismiss - stop monitoring
+              ref.read(activeAlarmsProvider.notifier).acknowledgeAlarm(alarm.id);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: theme.colorScheme.onError,
+              foregroundColor: theme.colorScheme.error,
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            child: Text(
+              'DISMISS',
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: theme.colorScheme.error, // Explicit high-contrast color
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoCard(Anchor? anchor, PositionUpdate? position, AppSettings settings, bool isMonitoring) {
+    return Card(
+      elevation: 4,
+      child: InkWell(
+        onTap: () {
+          setState(() {
+            _isInfoCardExpanded = !_isInfoCardExpanded;
+          });
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Monitoring status - always visible, with expand/collapse icon
+              Row(
+                children: [
+                  Icon(
+                    isMonitoring ? Icons.visibility : Icons.visibility_off,
+                    color: isMonitoring ? Colors.green : Colors.orange,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      isMonitoring ? 'Monitoring Active' : 'Monitoring Paused',
+                      style: TextStyle(
+                        color: isMonitoring ? Colors.green : Colors.orange,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                  Icon(
+                    _isInfoCardExpanded ? Icons.expand_less : Icons.expand_more,
+                    size: 20,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+
+              // Expanded content
+              if (_isInfoCardExpanded) ...[
+                const SizedBox(height: 12),
+                // Anchor info
+                if (anchor != null) ...[
+                  Text(
+                    'Anchor Set',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Radius: ${formatDistance(anchor.radius, settings.unitSystem)}',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                  if (position != null) ...[
+                    const SizedBox(height: 4),
+                    Builder(
+                      builder: (context) {
+                        final distance = calculateDistance(
+                          anchor.latitude,
+                          anchor.longitude,
+                          position.latitude,
+                          position.longitude,
+                        );
+                        final isWithinRadius = distance <= anchor.radius;
+                        return Text(
+                          'Distance: ${formatDistance(distance, settings.unitSystem)} ${isWithinRadius ? "(within radius)" : "(OUTSIDE RADIUS)"}',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: isWithinRadius ? null : Colors.red,
+                            fontWeight: isWithinRadius ? null : FontWeight.bold,
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ] else ...[
+                  Text(
+                    'No Anchor Set',
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: Colors.grey,
+                    ),
+                  ),
+                ],
+                // Position info
+                if (position != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    'Current Position',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Speed: ${position.speed != null ? formatSpeed(position.speed!, settings.unitSystem) : "N/A"}',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Accuracy: ${position.accuracy != null ? formatAccuracy(position.accuracy!, settings.unitSystem) : "N/A"}',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                ],
+                // Raise anchor button - only shown when anchor is set
+                if (anchor != null) ...[
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () async {
+                        final confirmed = await showDialog<bool>(
+                          context: context,
+                          builder: (context) => AlertDialog(
+                            title: const Text('Clear Anchor'),
+                            content: const Text('Are you sure you want to clear the anchor?'),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(context, false),
+                                child: const Text('Cancel'),
+                              ),
+                              TextButton(
+                                onPressed: () => Navigator.pop(context, true),
+                                child: const Text('Clear'),
+                              ),
+                            ],
+                          ),
+                        );
+
+                        if (confirmed == true) {
+                          try {
+                            // Clear all alarms and stop monitoring BEFORE clearing anchor
+                            ref.read(activeAlarmsProvider.notifier).clearAllAlarms();
+                            ref.read(activeAlarmsProvider.notifier).stopMonitoring();
+
+                            // Clear anchor
+                            await ref.read(anchorProvider.notifier).clearAnchor();
+
+                            // Clear position history
+                            ref.read(positionHistoryProvider.notifier).clearHistory();
+
+                            // Clear cached polygon
+                            setState(() {
+                              _displayAnchorPosition = null;
+                              _cachedPolygonPoints = null;
+                              _cachedPolygonCenter = null;
+                              _cachedPolygonRadius = null;
+                            });
+                          } catch (e, stackTrace) {
+                            logger.e('Error clearing anchor', error: e, stackTrace: stackTrace);
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Failed to clear anchor: $e'),
+                                  backgroundColor: Theme.of(context).colorScheme.error,
+                                ),
+                              );
+                            }
+                          }
+                        }
+                      },
+                      icon: const Icon(Icons.anchor),
+                      label: const Text('Raise Anchor'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.orange,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAnchorControls(Anchor? anchor, bool isMonitoring) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (anchor == null) ...[
+          // Set anchor button
+          SizedBox(
+            width: double.infinity,
+            child:             ElevatedButton.icon(
+              onPressed: () async {
+                try {
+                  final position = await _getCurrentPositionWithTimeout();
+                  final settings = ref.read(settingsProvider);
+                  await _createAnchorFromPosition(position, settings);
+                  await _adjustMapForNewAnchor();
+                  await _startMonitoringForNewAnchor(position, settings);
+                } on TimeoutException catch (e) {
+                  _handleTimeoutError(e);
+                } catch (e, stackTrace) {
+                  _handleAnchorSetupError(e, stackTrace);
+                }
+              },
+              icon: const Icon(Icons.anchor),
+              label: const Text('Set Anchor'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+        ] else ...[
+          // Anchor controls
+          if (!isMonitoring) ...[
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () => ref.read(activeAlarmsProvider.notifier).startMonitoring(),
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Restart Monitoring'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          // Anchor radius slider
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Anchor Radius: ${formatDistance(anchor.radius, ref.watch(settingsProvider).unitSystem)}',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Slider(
+                    value: _sliderRadiusValue,
+                    min: 1.0,
+                    max: 100.0,
+                    divisions: 99,
+                    label: '${_sliderRadiusValue.round()}m',
+                    onChanged: (value) {
+                      // Update local slider value for smooth visual feedback
+                      setState(() {
+                        _sliderRadiusValue = value;
+                      });
+
+                      // Pause monitoring once when dragging starts to prevent false alarms
+                      if (!_isDraggingRadius) {
+                        _isDraggingRadius = true;
+                        ref.read(activeAlarmsProvider.notifier).pauseMonitoring();
+                      }
+                    },
+                    onChangeEnd: (value) async {
+                      try {
+                        await ref.read(anchorProvider.notifier).updateRadius(_sliderRadiusValue);
+                        // Resume monitoring after radius update
+                        ref.read(activeAlarmsProvider.notifier).resumeMonitoring();
+                      } catch (e, stackTrace) {
+                        logger.e('Error updating anchor radius', error: e, stackTrace: stackTrace);
+                        // Ensure monitoring is resumed even on error
+                        ref.read(activeAlarmsProvider.notifier).resumeMonitoring();
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Failed to update anchor radius: $e'),
+                              backgroundColor: Theme.of(context).colorScheme.error,
+                            ),
+                          );
+                        }
+                      } finally {
+                        _isDraggingRadius = false;
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Color _getAnchorCircleColor(Anchor anchor, PositionUpdate? position, BuildContext context, {double? currentRadius}) {
+    final theme = Theme.of(context);
+
+    if (position == null) {
+      // Use warning color if GPS is lost
+      return theme.colorScheme.tertiary;
+    }
+
+    final distance = calculateDistance(
+      anchor.latitude,
+      anchor.longitude,
+      position.latitude,
+      position.longitude,
+    );
+
+    // Error color when boat is outside radius, primary when inside
+    final effectiveRadius = currentRadius ?? anchor.radius;
+    return distance > effectiveRadius
+        ? theme.colorScheme.error
+        : theme.colorScheme.primary;
+  }
+
+  Future<PositionUpdate> _getCurrentPositionWithTimeout() async {
+    return await ref.read(positionProvider.notifier)
+        .getCurrentPosition()
+        .timeout(
+          const Duration(seconds: 10),
+          onTimeout: () {
+            throw TimeoutException('GPS position request timed out. Please check GPS signal.');
+          },
+        );
+  }
+
+  Future<void> _createAnchorFromPosition(PositionUpdate position, AppSettings settings) async {
+    await ref.read(anchorProvider.notifier).setAnchor(
+          latitude: position.latitude,
+          longitude: position.longitude,
+          radius: settings.defaultRadius,
+        );
+  }
+
+  Future<void> _adjustMapForNewAnchor() async {
+    final anchor = ref.read(anchorProvider);
+    if (anchor != null) {
+      final zoomLevel = _calculateZoomForRadius(anchor.radius);
+      final center = LatLng(anchor.latitude, anchor.longitude);
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _mapController.move(center, zoomLevel);
+        }
+      });
+    }
+  }
+
+  Future<void> _startMonitoringForNewAnchor(PositionUpdate position, AppSettings settings) async {
+    try {
+      ref.read(activeAlarmsProvider.notifier).startMonitoring();
+      logger.i('Anchor set at ${position.latitude}, ${position.longitude} with zoom ${_calculateZoomForRadius(settings.defaultRadius)}');
+    } catch (e, stackTrace) {
+      logger.e('Failed to start monitoring after setting anchor', error: e, stackTrace: stackTrace);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Anchor set, but monitoring failed to start. Use "Restart Monitoring" button.'),
+            backgroundColor: Theme.of(context).colorScheme.error,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
+  }
+
+  void _handleTimeoutError(TimeoutException e) {
+    logger.e('Timeout getting GPS position: $e');
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$e'),
+          backgroundColor: Theme.of(context).colorScheme.error,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
+  void _handleAnchorSetupError(Object e, [StackTrace? stackTrace]) {
+    logger.e('Failed to set anchor', error: e, stackTrace: stackTrace);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to set anchor: $e'),
+          backgroundColor: Theme.of(context).colorScheme.error,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final anchor = ref.watch(anchorProvider);
@@ -62,64 +550,83 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final positionHistory = ref.watch(positionHistoryProvider);
     final settings = ref.watch(settingsProvider);
     final alarms = ref.watch(activeAlarmsProvider);
-    
-    // Show alarm dialog for unacknowledged alarms
-    final unacknowledgedAlarms = alarms.where((a) => !a.acknowledged).toList();
-    if (unacknowledgedAlarms.isNotEmpty) {
-      final latestAlarm = unacknowledgedAlarms.first;
-      // Only show dialog if we haven't shown it for this alarm yet
-      if (_shownAlarmId != latestAlarm.id) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
+    final isMonitoring = ref.read(activeAlarmsProvider.notifier).isMonitoring;
+    final activeAlarms = alarms.where((a) => a.severity == Severity.alarm).toList();
+    final activeWarnings = alarms.where((a) => a.severity == Severity.warning).toList();
+
+    // Set up listeners
+    ref.listen<Anchor?>(anchorProvider, (previous, next) {
+      if (next != null && next.isActive && previous == null) {
+        try {
+          ref.read(activeAlarmsProvider.notifier).startMonitoring();
+          logger.i('Started monitoring on anchor set');
+        } catch (e, stackTrace) {
+          logger.e('Failed to start monitoring on anchor set', error: e, stackTrace: stackTrace);
           if (mounted) {
-            _showAlarmDialog(context, latestAlarm);
-            _shownAlarmId = latestAlarm.id;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Failed to start monitoring: $e'),
+                backgroundColor: Theme.of(context).colorScheme.error,
+              ),
+            );
           }
-        });
+        }
       }
-    } else {
-      // Reset shown alarm ID when no alarms
-      _shownAlarmId = null;
+    });
+
+    // Handle warnings
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        for (final warning in activeWarnings) {
+          if (!_shownWarningIds.contains(warning.id)) {
+            _shownWarningIds.add(warning.id);
+            _showWarningSnackBar(warning, settings);
+          }
+        }
+        _shownWarningIds.removeWhere((id) => !activeWarnings.any((w) => w.id == id));
+      }
+    });
+
+    // Update anchor display position
+    LatLng? displayAnchorPosition = _displayAnchorPosition;
+    if (!_isDraggingAnchor) {
+      if (anchor != null) {
+        final newPosition = LatLng(anchor.latitude, anchor.longitude);
+        final currentPosition = displayAnchorPosition;
+        final isNewAnchor = _previousAnchor == null;
+        final radiusChanged = _previousAnchor?.radius != anchor.radius;
+
+        if (currentPosition == null ||
+            currentPosition.latitude != newPosition.latitude ||
+            currentPosition.longitude != newPosition.longitude ||
+            radiusChanged) {
+          displayAnchorPosition = newPosition;
+          _displayAnchorPosition = newPosition;
+          _cachedPolygonPoints = null;
+
+          if (isNewAnchor || (radiusChanged && (anchor.radius - (_previousAnchor?.radius ?? anchor.radius)).abs() > 10)) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) {
+                final zoomLevel = _calculateZoomForRadius(anchor.radius);
+                _mapController.move(newPosition, zoomLevel);
+              }
+            });
+          }
+        }
+      } else if (displayAnchorPosition != null) {
+        displayAnchorPosition = null;
+        _displayAnchorPosition = null;
+        _cachedPolygonPoints = null;
+      }
     }
-    
-    // Initialize display position if anchor exists and display position is null
-    if (anchor != null && _displayAnchorPosition == null && !_isDraggingAnchor) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          setState(() {
-            _displayAnchorPosition = LatLng(anchor.latitude, anchor.longitude);
-            logger.d('Initialized display anchor position: (${_displayAnchorPosition!.latitude}, ${_displayAnchorPosition!.longitude})');
-          });
-        }
-      });
-    } else if (anchor == null && _displayAnchorPosition != null) {
-      // Clear display position when anchor is cleared
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          setState(() {
-            _displayAnchorPosition = null;
-            _isDraggingAnchor = false;
-            _originalAnchorPosition = null;
-            logger.d('Cleared display anchor position');
-          });
-        }
-      });
-    } else if (anchor != null && 
-               _displayAnchorPosition != null && 
-               !_isDraggingAnchor &&
-               (anchor.latitude != _displayAnchorPosition!.latitude ||
-                anchor.longitude != _displayAnchorPosition!.longitude)) {
-      // Update display position if anchor changed externally (not during drag)
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          setState(() {
-            _displayAnchorPosition = LatLng(anchor.latitude, anchor.longitude);
-            logger.d('Updated display anchor position from external change: (${_displayAnchorPosition!.latitude}, ${_displayAnchorPosition!.longitude})');
-          });
-        }
-      });
+    _previousAnchor = anchor;
+
+    // Update local slider value when anchor changes
+    if (anchor != null && !_isDraggingRadius) {
+      _sliderRadiusValue = anchor.radius;
     }
 
-    // Determine center point for map
+    // Calculate map center
     LatLng? centerPoint;
     if (position != null) {
       centerPoint = LatLng(position.latitude, position.longitude);
@@ -128,502 +635,69 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Anchor Alarm'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.devices),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const PairingScreen(),
-                ),
-              );
-            },
-            tooltip: 'Device Pairing',
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const SettingsScreen(),
-                ),
-              );
-            },
-          ),
-        ],
-      ),
+      appBar: _buildAppBar(),
       body: centerPoint == null
-          ? const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text('Waiting for GPS signal...'),
-                ],
-              ),
-            )
-          : Stack(
-              children: [
-                // Map
-                FlutterMap(
-                  key: _mapKey,
-                  mapController: _mapController,
-                  options: MapOptions(
-                    initialCenter: centerPoint,
-                    initialZoom: 16.3, // Zoom level to show approximately 200m
-                    minZoom: 5.0,
-                    maxZoom: 19.0, // Match OpenStreetMap tile maxZoom
-                    backgroundColor: Colors.white,
-                    interactionOptions: const InteractionOptions(
-                      flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
-                    ),
-                    // Note: Anchorages are shown visually in OpenSeaMap seamark tiles.
-                    // Querying Overpass API for anchorage data is unreliable due to sparse coverage.
-                    // The seamark tiles already display anchorage icons when zoomed in.
-                  ),
-                  children: [
-                    // Base map layer (OpenStreetMap)
-                    TileLayer(
-                      urlTemplate:
-                          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                      userAgentPackageName: 'com.example.anchor_alarm',
-                      maxZoom: 19,
-                      errorTileCallback: (tile, error, stackTrace) {
-                        logger.w('Failed to load OpenStreetMap tile: $error');
-                      },
-                    ),
-                    // OpenSeaMap nautical overlay (seamarks, buoys, depths soundings, anchorages, harbors, etc.)
-                    // Note: In flutter_map 8.2+, overlay layers are transparent by default
-                    TileLayer(
-                      urlTemplate:
-                          'https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',
-                      userAgentPackageName: 'com.example.anchor_alarm',
-                      maxZoom: 18,
-                      errorTileCallback: (tile, error, stackTrace) {
-                        logger.w('Failed to load OpenSeaMap tile: $error');
-                      },
-                    ),
-                    // Position history track (polyline showing boat movement)
-                    if (positionHistory.isNotEmpty)
-                      PolylineLayer(
-                        polylines: [
-                          Polyline(
-                            points: positionHistory,
-                            strokeWidth: 2.0,
-                            color: Colors.orange,
-                          ),
-                        ],
-                      ),
-                    // Other markers (e.g., current position)
-                    MarkerLayer(
-                      markers: _buildMarkers(anchor, position),
-                    ),
-                    // Anchor radius circle (geographic polygon that scales with zoom)
-                    if (anchor != null && anchor.isActive && _displayAnchorPosition != null)
-                      PolygonLayer(
-                        polygons: <Polygon>[
-                          Polygon(
-                            points: _createCirclePolygon(
-                              _displayAnchorPosition!,
-                              anchor.radius,
-                            ),
-                            color: Colors.blue.withValues(alpha: 0.2),
-                            borderColor: Colors.blue,
-                            borderStrokeWidth: 2.0,
-                          ),
-                        ],
-                      ),
-                    // Draggable anchor marker layer
-                    // IMPORTANT: DragMarkers must be LAST so it renders on top and can receive touch events
-                    if (anchor != null && _displayAnchorPosition != null)
-                      DragMarkers(
-                        markers: [
-                          DragMarker(
-                            point: _displayAnchorPosition!,
-                            size: const Size(60, 60), // Increased size for better hit area
-                            offset: const Offset(0.0, -30.0), // Align icon tip with point
-                            builder: (ctx, point, isDragging) {
-                              logger.d('DragMarker builder: isDragging=$isDragging, point=(${point.latitude}, ${point.longitude})');
-                              return Container(
-                                decoration: BoxDecoration(
-                                  color: isDragging ? Colors.orange : Colors.blue,
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: Colors.white,
-                                    width: 2,
-                                  ),
-                                ),
-                                child: const Icon(
-                                  Icons.anchor,
-                                  color: Colors.white,
-                                  size: 30,
-                                ),
-                              );
-                            },
-                            onDragStart: (details, point) {
-                              logger.i('DragMarker onDragStart: point=(${point.latitude}, ${point.longitude})');
-                              setState(() {
-                                _isDraggingAnchor = true;
-                                _originalAnchorPosition = _displayAnchorPosition;
-                                _displayAnchorPosition = point;
-                              });
-                            },
-                            onDragUpdate: (details, point) {
-                              logger.d('DragMarker onDragUpdate: point=(${point.latitude}, ${point.longitude})');
-                              setState(() {
-                                _displayAnchorPosition = point;
-                              });
-                            },
-                            onDragEnd: (details, point) {
-                              logger.i('DragMarker onDragEnd: point=(${point.latitude}, ${point.longitude})');
-                              // No auto-save here; wait for user confirm
-                            },
-                          ),
-                        ],
-                      ),
-                  ],
-                ),
-                // Info overlay
-                Positioned(
-                  top: 16,
-                  left: 16,
-                  right: 16,
-                  child: _buildInfoCard(anchor, position, settings),
-                ),
-                // Anchor controls
-                Positioned(
-                  bottom: 16,
-                  left: 16,
-                  right: 16,
-                  child: _buildAnchorControls(anchor),
-                ),
-                // Attribution
-                Positioned(
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    color: Colors.black.withValues(alpha: 0.5),
-                    child: const Text(
-                      'Nautical data © OpenSeaMap contributors | Map © OpenStreetMap',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 10,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-        );
-  }
-
-  List<Marker> _buildMarkers(Anchor? anchor, PositionUpdate? position) {
-    final markers = <Marker>[];
-
-    // Current position marker
-    if (position != null) {
-      markers.add(
-        Marker(
-          point: LatLng(position.latitude, position.longitude),
-          width: 30,
-          height: 30,
-          child: const Icon(
-            Icons.location_on,
-            color: Colors.red,
-            size: 30,
-          ),
-        ),
-      );
-    }
-
-    // Note: Anchorage markers are shown visually in OpenSeaMap seamark tiles.
-    // Querying Overpass API for anchorage data is unreliable due to sparse coverage
-    // and frequent timeouts. The seamark tiles already display anchorage icons
-    // when zoomed in (typically zoom level 12-16+).
-
-    // Anchor marker is now handled by DragMarkers layer
-    return markers;
-  }
-
-  /// Shows an alarm dialog for the given alarm event.
-  Future<void> _showAlarmDialog(BuildContext context, AlarmEvent alarm) async {
-    await showDialog(
-      context: context,
-      barrierDismissible: false, // Must explicitly dismiss
-      builder: (BuildContext context) {
-        return AlertDialog(
-          backgroundColor: Colors.red.shade700,
-          title: Row(
-            children: [
-              const Icon(Icons.warning, color: Colors.white, size: 32),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Text(
-                  'ANCHOR ALARM',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 20,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'ALARM TYPE: ${alarm.type.name.toUpperCase()}',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                ),
-              ),
-              const SizedBox(height: 12),
-              if (alarm.type == AlarmType.driftExceeded) ...[
-                Text(
-                  'Your boat has drifted ${alarm.distanceFromAnchor.toStringAsFixed(1)} meters from the anchor position.',
-                  style: const TextStyle(color: Colors.white, fontSize: 14),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Anchor radius: ${alarm.distanceFromAnchor.toStringAsFixed(1)}m',
-                  style: const TextStyle(color: Colors.white70, fontSize: 12),
-                ),
-              ] else if (alarm.type == AlarmType.gpsLost) ...[
-                const Text(
-                  'GPS signal has been lost. Position tracking is unavailable.',
-                  style: TextStyle(color: Colors.white, fontSize: 14),
-                ),
-              ] else if (alarm.type == AlarmType.gpsInaccurate) ...[
-                const Text(
-                  'GPS accuracy is poor. Position may be unreliable.',
-                  style: TextStyle(color: Colors.white, fontSize: 14),
-                ),
-              ],
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                ref.read(activeAlarmsProvider.notifier).acknowledgeAlarm(alarm.id);
-              },
-              style: TextButton.styleFrom(
-                backgroundColor: Colors.white,
-                foregroundColor: Colors.red.shade700,
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-              ),
-              child: const Text(
-                'DISMISS',
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                ),
-              ),
-            ),
-          ],
-        );
-      },
+          ? _buildLoadingState()
+          : _buildMapStack(anchor, position, positionHistory, displayAnchorPosition, activeAlarms, settings, isMonitoring, centerPoint, currentRadius: _isDraggingRadius ? _sliderRadiusValue : null),
     );
   }
 
-  Widget _buildInfoCard(
-    Anchor? anchor,
-    PositionUpdate? position,
-    settings,
-  ) {
-    String distanceText = 'N/A';
-    if (anchor != null && position != null) {
-      final distance = calculateDistance(
-        anchor.latitude,
-        anchor.longitude,
-        position.latitude,
-        position.longitude,
-      );
-      distanceText = settings.unitSystem == UnitSystem.metric
-          ? '${distance.toStringAsFixed(1)} m'
-          : '${(distance * 3.28084).toStringAsFixed(1)} ft';
+  /// Calculates appropriate zoom level to show the full anchor radius circle.
+  /// Returns zoom level that ensures the radius is visible with some padding.
+  double _calculateZoomForRadius(double radiusMeters) {
+    // Approximate: at zoom 18, 1 pixel ≈ 0.6 meters
+    // We want the radius to be about 1/3 of the visible area for good visibility
+    // Formula: zoom = 18 - log2(radius / (screenWidth * 0.3 / 0.6))
+    // Simplified: zoom = 18 - log2(radius / 50) for typical phone screen
+    const double baseZoom = 18.0;
+    const double baseRadius = 50.0; // 50m at zoom 18 fills about 1/3 of screen
+
+    if (radiusMeters <= 0) return baseZoom;
+
+    // Calculate zoom: larger radius needs lower zoom
+    final zoom = baseZoom - math.log(radiusMeters / baseRadius) / math.ln2;
+
+    // Clamp to valid zoom range
+    return zoom.clamp(5.0, 19.0);
+  }
+
+  /// Shows a warning as a SnackBar (non-intrusive).
+  void _showWarningSnackBar(AlarmEvent warning, AppSettings settings) {
+    final theme = Theme.of(context);
+    String message;
+    if (warning.type == AlarmType.gpsLost) {
+      message = 'GPS signal lost';
+    } else if (warning.type == AlarmType.gpsInaccurate) {
+      message = 'GPS accuracy poor';
+    } else {
+      message = 'Warning: ${warning.type.name}';
     }
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
           children: [
-            Text(
-              'Distance from Anchor: $distanceText',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            if (position != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                'Speed: ${position.speed != null ? (position.speed! * 3.6).toStringAsFixed(1) : "N/A"} km/h',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-              Text(
-                'Accuracy: ${position.accuracy != null ? position.accuracy!.toStringAsFixed(1) : "N/A"} m',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-            ],
+            Icon(Icons.info_outline, color: theme.colorScheme.onSurface),
+            const SizedBox(width: 12),
+            Expanded(child: Text(message)),
           ],
+        ),
+        backgroundColor: theme.colorScheme.surfaceContainerHighest,
+        duration: const Duration(seconds: 4),
+        action: SnackBarAction(
+          label: 'Dismiss',
+          textColor: theme.colorScheme.primary,
+          onPressed: () {
+            // Remove from shown warning IDs immediately to prevent re-showing
+            _shownWarningIds.remove(warning.id);
+            ref.read(activeAlarmsProvider.notifier).acknowledgeAlarm(warning.id);
+          },
         ),
       ),
     );
   }
 
-  Widget _buildAnchorControls(Anchor? anchor) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Radius adjustment slider (when anchor is set)
-            if (anchor != null && !_isDraggingAnchor) ...[
-              Row(
-                children: [
-                  const Icon(Icons.radio_button_unchecked, size: 20),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Anchor Radius: ${anchor.radius.toStringAsFixed(0)} m',
-                          style: Theme.of(context).textTheme.titleSmall,
-                        ),
-                        Slider(
-                          value: anchor.radius,
-                          min: 20,
-                          max: 100,
-                          divisions: 16,
-                          label: '${anchor.radius.toStringAsFixed(0)} m',
-                          onChanged: (value) {
-                            ref.read(anchorProvider.notifier).updateRadius(value);
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const Divider(),
-            ],
-            // Control buttons
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                if (anchor == null)
-                  ElevatedButton.icon(
-                    onPressed: () => _setAnchorFromCurrentPosition(),
-                    icon: const Icon(Icons.anchor),
-                    label: const Text('Set Anchor'),
-                  )
-                else ...[
-                  if (_isDraggingAnchor) ...[
-                    ElevatedButton.icon(
-                      onPressed: _confirmAnchorDrag,
-                      icon: const Icon(Icons.check),
-                      label: const Text('Confirm'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.green,
-                      ),
-                    ),
-                    ElevatedButton.icon(
-                      onPressed: _cancelAnchorDrag,
-                      icon: const Icon(Icons.cancel),
-                      label: const Text('Cancel'),
-                    ),
-                  ],
-                  ElevatedButton.icon(
-                    onPressed: () => _clearAnchor(),
-                    icon: const Icon(Icons.delete),
-                    label: const Text('Clear'),
-                  ),
-                ],
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _setAnchorFromCurrentPosition() async {
-    try {
-      final position = await ref.read(positionProvider.notifier).getCurrentPosition();
-      final settings = ref.read(settingsProvider);
-      
-      await ref.read(anchorProvider.notifier).setAnchor(
-            latitude: position.latitude,
-            longitude: position.longitude,
-            radius: settings.defaultRadius,
-          );
-      
-      // Start alarm monitoring when anchor is set
-      ref.read(activeAlarmsProvider.notifier).startMonitoring();
-      logger.i('Anchor set at ${position.latitude}, ${position.longitude}');
-    } catch (e, stackTrace) {
-      logger.e(
-        'Failed to set anchor',
-        error: e,
-        stackTrace: stackTrace,
-      );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to set anchor: $e'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 5),
-          ),
-        );
-      }
-    }
-  }
-
-
-  void _confirmAnchorDrag() {
-    if (_displayAnchorPosition == null) {
-      return;
-    }
-
-    ref.read(anchorProvider.notifier).updateAnchorPosition(
-          latitude: _displayAnchorPosition!.latitude,
-          longitude: _displayAnchorPosition!.longitude,
-        );
-
-    logger.i('Anchor position confirmed: ${_displayAnchorPosition!.latitude}, ${_displayAnchorPosition!.longitude}');
-
-    setState(() {
-      _isDraggingAnchor = false;
-      _originalAnchorPosition = null;
-    });
-  }
-
-  void _cancelAnchorDrag() {
-    logger.i('Anchor drag cancelled');
-    setState(() {
-      if (_originalAnchorPosition != null) {
-        _displayAnchorPosition = _originalAnchorPosition;
-      }
-      _isDraggingAnchor = false;
-      _originalAnchorPosition = null;
-    });
-  }
-
+  @override
   Future<void> _clearAnchor() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -644,13 +718,72 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     );
 
     if (confirmed == true) {
-      await ref.read(anchorProvider.notifier).clearAnchor();
-      
-      // Stop alarm monitoring when anchor is cleared
-      ref.read(activeAlarmsProvider.notifier).stopMonitoring();
+      try {
+        // Clear all alarms and stop monitoring BEFORE clearing anchor
+        ref.read(activeAlarmsProvider.notifier).clearAllAlarms();
+        ref.read(activeAlarmsProvider.notifier).stopMonitoring();
+        
+        // Clear anchor
+        await ref.read(anchorProvider.notifier).clearAnchor();
+        
+        // Clear position history
+        ref.read(positionHistoryProvider.notifier).clearHistory();
+        
+        // Clear cached polygon
+        setState(() {
+          _displayAnchorPosition = null;
+          _cachedPolygonPoints = null;
+          _cachedPolygonCenter = null;
+          _cachedPolygonRadius = null;
+        });
+      } catch (e, stackTrace) {
+        logger.e('Error clearing anchor', error: e, stackTrace: stackTrace);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to clear anchor: $e'),
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+          );
+        }
+      }
     }
   }
 
+  /// Gets a cached circle polygon from a center point and radius in meters.
+  /// The polygon will scale correctly with map zoom since it's defined in geographic coordinates.
+  /// 
+  /// [center] must not be null. This method assumes non-null input but includes defensive checks.
+  List<LatLng> _getCachedCirclePolygon(LatLng center, double radiusMeters) {
+    // Defensive null check (should never happen, but prevents crashes)
+    if (center.latitude.isNaN || center.longitude.isNaN || radiusMeters.isNaN || radiusMeters <= 0) {
+      logger.w('Invalid parameters to _getCachedCirclePolygon: center=$center, radius=$radiusMeters');
+      return [];
+    }
+    
+    // Return cached polygon if center and radius haven't changed
+    final cachedCenter = _cachedPolygonCenter;
+    final cachedRadius = _cachedPolygonRadius;
+    final cachedPoints = _cachedPolygonPoints;
+    
+    if (cachedPoints != null &&
+        cachedCenter != null &&
+        cachedRadius != null &&
+        (cachedCenter.latitude - center.latitude).abs() < 0.000001 &&
+        (cachedCenter.longitude - center.longitude).abs() < 0.000001 &&
+        (cachedRadius - radiusMeters).abs() < 0.01) {
+      return cachedPoints;
+    }
+    
+    // Generate new polygon
+    final newPolygon = _createCirclePolygon(center, radiusMeters);
+    _cachedPolygonPoints = newPolygon;
+    _cachedPolygonCenter = center;
+    _cachedPolygonRadius = radiusMeters;
+    
+    return newPolygon;
+  }
+  
   /// Creates a circle polygon from a center point and radius in meters.
   /// The polygon will scale correctly with map zoom since it's defined in geographic coordinates.
   List<LatLng> _createCirclePolygon(LatLng center, double radiusMeters) {
@@ -686,6 +819,446 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
     
     return polygonPoints;
+  }
+
+  /// Builds the app bar with navigation actions.
+
+  void _setupAnchorListener() {
+    ref.listen<Anchor?>(anchorProvider, (previous, next) {
+      if (next != null && next.isActive && previous == null) {
+        try {
+          ref.read(activeAlarmsProvider.notifier).startMonitoring();
+          logger.i('Started monitoring on anchor set');
+        } catch (e, stackTrace) {
+          logger.e('Failed to start monitoring on anchor set', error: e, stackTrace: stackTrace);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Failed to start monitoring: $e'),
+                backgroundColor: Theme.of(context).colorScheme.error,
+              ),
+            );
+          }
+        }
+      }
+    });
+  }
+
+  void _handleWarnings(List<AlarmEvent> activeWarnings, AppSettings settings) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        for (final warning in activeWarnings) {
+          if (!_shownWarningIds.contains(warning.id)) {
+            _shownWarningIds.add(warning.id);
+            (() {
+              final theme = Theme.of(context);
+              String message;
+              if (warning.type == AlarmType.gpsLost) {
+                message = 'GPS signal lost';
+              } else if (warning.type == AlarmType.gpsInaccurate) {
+                message = 'GPS accuracy poor';
+              } else {
+                message = 'Warning: ${warning.type.name}';
+              }
+
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Row(
+                    children: [
+                      Icon(Icons.info_outline, color: theme.colorScheme.onSurface),
+                      const SizedBox(width: 12),
+                      Expanded(child: Text(message)),
+                    ],
+                  ),
+                  backgroundColor: theme.colorScheme.surfaceContainerHighest,
+                  duration: const Duration(seconds: 4),
+                  action: SnackBarAction(
+                    label: 'Dismiss',
+                    textColor: theme.colorScheme.primary,
+                    onPressed: () {
+                      // Remove from shown warning IDs immediately to prevent re-showing
+                      _shownWarningIds.remove(warning.id);
+                      ref.read(activeAlarmsProvider.notifier).acknowledgeAlarm(warning.id);
+                    },
+                  ),
+                ),
+              );
+            })();
+          }
+        }
+        _shownWarningIds.removeWhere((id) => !activeWarnings.any((w) => w.id == id));
+      }
+    });
+  }
+
+  LatLng? _updateAnchorDisplay(Anchor? anchor) {
+    LatLng? displayAnchorPosition = _displayAnchorPosition;
+
+    if (!_isDraggingAnchor) {
+      if (anchor != null) {
+        final newPosition = LatLng(anchor.latitude, anchor.longitude);
+        final currentPosition = displayAnchorPosition;
+        final isNewAnchor = _previousAnchor == null;
+        final radiusChanged = _previousAnchor?.radius != anchor.radius;
+
+        if (currentPosition == null ||
+            currentPosition.latitude != newPosition.latitude ||
+            currentPosition.longitude != newPosition.longitude ||
+            radiusChanged) {
+          displayAnchorPosition = newPosition;
+          _displayAnchorPosition = newPosition;
+          _cachedPolygonPoints = null;
+
+          if (isNewAnchor || (radiusChanged && (anchor.radius - (_previousAnchor?.radius ?? anchor.radius)).abs() > 10)) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) {
+                final zoomLevel = (() {
+                  // Approximate: at zoom 18, 1 pixel ≈ 0.6 meters
+                  // We want the radius to be about 1/3 of the visible area for good visibility
+                  // Formula: zoom = 18 - log2(radius / (screenWidth * 0.3 / 0.6))
+                  // Simplified: zoom = 18 - log2(radius / 50) for typical phone screen
+                  const double baseZoom = 18.0;
+                  const double baseRadius = 50.0; // 50m at zoom 18 fills about 1/3 of screen
+
+                  final radiusMeters = anchor.radius;
+                  if (radiusMeters <= 0) return baseZoom;
+
+                  // Calculate zoom: larger radius needs lower zoom
+                  final zoom = baseZoom - math.log(radiusMeters / baseRadius) / math.ln2;
+
+                  // Clamp to valid zoom range
+                  return zoom.clamp(5.0, 19.0);
+                })();
+                _mapController.move(newPosition, zoomLevel);
+              }
+            });
+          }
+        }
+      } else if (displayAnchorPosition != null) {
+        displayAnchorPosition = null;
+        _displayAnchorPosition = null;
+        _cachedPolygonPoints = null;
+      }
+    }
+
+    _previousAnchor = anchor;
+    return displayAnchorPosition;
+  }
+
+  LatLng? _calculateCenterPoint(PositionUpdate? position, Anchor? anchor) {
+    if (position != null) {
+      return LatLng(position.latitude, position.longitude);
+    } else if (anchor != null) {
+      return LatLng(anchor.latitude, anchor.longitude);
+    }
+    return null;
+  }
+
+  List<Marker> _buildMarkers(Anchor? anchor, PositionUpdate? position) {
+    final markers = <Marker>[];
+
+    // Current position marker
+    if (position != null) {
+      markers.add(
+        Marker(
+          point: LatLng(position.latitude, position.longitude),
+          width: 30,
+          height: 30,
+          child: Icon(
+            Icons.location_on,
+            color: Theme.of(context).colorScheme.error,
+            size: 30,
+          ),
+        ),
+      );
+    }
+
+    // Note: Anchor marker is handled by DragMarkers layer, not MarkerLayer
+    return markers;
+  }
+
+  PreferredSizeWidget _buildAppBar() {
+    return AppBar(
+      title: const Text('Anchor Alarm'),
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.devices),
+          onPressed: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => const PairingScreen(),
+              ),
+            );
+          },
+          tooltip: 'Device Pairing',
+        ),
+        IconButton(
+          icon: const Icon(Icons.settings),
+          onPressed: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => const SettingsScreen(),
+              ),
+            );
+          },
+          tooltip: 'Settings',
+        ),
+      ],
+    );
+  }
+
+  /// Builds the loading state when GPS is not available.
+  Widget _buildLoadingState() {
+    return const Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          CircularProgressIndicator(),
+          SizedBox(height: 16),
+          Text('Waiting for GPS signal...'),
+        ],
+      ),
+    );
+  }
+
+  /// Builds the main map stack with all overlays.
+  Widget _buildMapStack(
+    Anchor? anchor,
+    PositionUpdate? position,
+    List<PositionHistoryPoint> positionHistory,
+    LatLng? displayAnchorPosition,
+    List<AlarmEvent> activeAlarms,
+    AppSettings settings,
+    bool isMonitoring,
+    LatLng centerPoint, {
+    double? currentRadius,
+  }) {
+    return Stack(
+      children: [
+        _buildMap(anchor, position, positionHistory, displayAnchorPosition, centerPoint, currentRadius: currentRadius),
+        ..._buildMapOverlays(anchor, position, activeAlarms, settings, isMonitoring),
+      ],
+    );
+  }
+
+  /// Builds the FlutterMap widget with all map layers.
+  Widget _buildMap(
+    Anchor? anchor,
+    PositionUpdate? position,
+    List<PositionHistoryPoint> positionHistory,
+    LatLng? displayAnchorPosition,
+    LatLng centerPoint, {
+    double? currentRadius,
+  }) {
+    return FlutterMap(
+      key: _mapKey,
+      mapController: _mapController,
+      options: MapOptions(
+        initialCenter: centerPoint,
+        initialZoom: 18.0,
+        minZoom: 5.0,
+        maxZoom: 20.0,
+        backgroundColor: Colors.white,
+        interactionOptions: InteractionOptions(
+          flags: _isDraggingAnchor
+              ? InteractiveFlag.none
+              : InteractiveFlag.all & ~InteractiveFlag.rotate,
+        ),
+      ),
+      children: _buildMapLayers(anchor, position, positionHistory, displayAnchorPosition, currentRadius: currentRadius),
+    );
+  }
+
+  /// Builds all map layers as a list of widgets.
+  List<Widget> _buildMapLayers(
+    Anchor? anchor,
+    PositionUpdate? position,
+    List<PositionHistoryPoint> positionHistory,
+    LatLng? displayAnchorPosition, {
+    double? currentRadius,
+  }) {
+    return [
+      // Base map layer
+      TileLayer(
+        urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+        userAgentPackageName: 'com.example.anchor_alarm',
+        maxZoom: 19,
+        errorTileCallback: (tile, error, stackTrace) {
+          logger.w('Failed to load OpenStreetMap tile: $error');
+        },
+      ),
+
+      // Nautical overlay
+      TileLayer(
+        urlTemplate: 'https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',
+        userAgentPackageName: 'com.example.anchor_alarm',
+        maxZoom: 18,
+        errorTileCallback: (tile, error, stackTrace) {
+          logger.w('Failed to load OpenSeaMap tile: $error');
+        },
+      ),
+
+      // Position history trail
+      if (positionHistory.length > 1)
+        PolylineLayer(
+          polylines: [
+            Polyline(
+              points: positionHistory.map((point) => point.position).toList(),
+              strokeWidth: 2.0,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+          ],
+        ),
+
+      // Markers
+      MarkerLayer(markers: _buildMarkers(anchor, position)),
+
+      // Anchor radius circle
+      if (anchor != null && anchor.isActive && displayAnchorPosition != null)
+        PolygonLayer(
+          polygons: [
+            Polygon(
+              points: _getCachedCirclePolygon(displayAnchorPosition, currentRadius ?? anchor!.radius),
+              color: _getAnchorCircleColor(anchor, position, context, currentRadius: currentRadius).withValues(alpha: 0.2),
+              borderColor: _getAnchorCircleColor(anchor, position, context, currentRadius: currentRadius),
+              borderStrokeWidth: 2.0,
+            ),
+          ],
+        ),
+
+      // Draggable anchor marker
+      if (anchor != null && displayAnchorPosition != null)
+        DragMarkers(
+          markers: [
+            DragMarker(
+              point: displayAnchorPosition,
+              size: const Size(40, 40),
+              offset: const Offset(0.0, -20.0),
+              builder: (ctx, point, isDragging) => Container(
+                decoration: BoxDecoration(
+                  color: isDragging
+                      ? Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.8)
+                      : Theme.of(context).colorScheme.surface.withValues(alpha: 0.9),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: Theme.of(context).colorScheme.primary,
+                    width: 2,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Theme.of(context).colorScheme.shadow.withValues(alpha: 0.3),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Icon(
+                  Icons.anchor,
+                  color: Theme.of(context).colorScheme.primary,
+                  size: 24,
+                ),
+              ),
+              onDragStart: (details, point) {
+                setState(() => _isDraggingAnchor = true);
+                ref.read(activeAlarmsProvider.notifier).pauseMonitoring();
+                logger.d('Started dragging anchor');
+              },
+              onDragUpdate: (details, point) {
+                setState(() => _displayAnchorPosition = point);
+              },
+              onDragEnd: (details, point) async {
+                try {
+                  setState(() {
+                    _isDraggingAnchor = false;
+                    _displayAnchorPosition = point;
+                    _cachedPolygonPoints = null;
+                  });
+                  ref.read(anchorProvider.notifier).updateAnchorPosition(
+                        latitude: point.latitude,
+                        longitude: point.longitude,
+                      );
+                  ref.read(activeAlarmsProvider.notifier).resumeMonitoring();
+                } catch (e, stackTrace) {
+                  logger.e('Error in onDragEnd', error: e, stackTrace: stackTrace);
+                  setState(() {
+                    _isDraggingAnchor = false;
+                    final anchor = ref.read(anchorProvider);
+                    if (anchor != null) {
+                      _displayAnchorPosition = LatLng(anchor.latitude, anchor.longitude);
+                    }
+                    _cachedPolygonPoints = null;
+                  });
+                  ref.read(activeAlarmsProvider.notifier).resumeMonitoring();
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('Failed to update anchor position: $e'),
+                        backgroundColor: Theme.of(context).colorScheme.error,
+                      ),
+                    );
+                  }
+                }
+              },
+            ),
+          ],
+        ),
+    ];
+  }
+
+  /// Builds all map overlays (banners, info cards, controls, attribution).
+  List<Widget> _buildMapOverlays(
+    Anchor? anchor,
+    PositionUpdate? position,
+    List<AlarmEvent> activeAlarms,
+    AppSettings settings,
+    bool isMonitoring,
+  ) {
+    return [
+      // Alarm banner
+      if (activeAlarms.isNotEmpty)
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: _buildAlarmBanner(activeAlarms.first, settings),
+        ),
+
+      // Info overlay
+      Positioned(
+        top: activeAlarms.isNotEmpty ? 80 : 16,
+        left: 16,
+        right: 16,
+        child: _buildInfoCard(anchor, position, settings, isMonitoring),
+      ),
+
+      // Anchor controls
+      Positioned(
+        bottom: 80,
+        left: 16,
+        right: 16,
+        child: _buildAnchorControls(anchor, isMonitoring),
+      ),
+
+      // Attribution
+      Positioned(
+        bottom: 0,
+        left: 0,
+        right: 0,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.8),
+          child: Text(
+            'Nautical data © OpenSeaMap contributors | Map © OpenStreetMap',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              fontSize: 10 * MediaQuery.textScalerOf(context).scale(1.0),
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+    ];
   }
 }
 

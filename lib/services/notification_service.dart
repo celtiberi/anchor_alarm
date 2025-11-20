@@ -4,12 +4,20 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../models/alarm_event.dart';
 import '../models/app_settings.dart';
 import '../utils/logger_setup.dart';
+import '../utils/distance_formatter.dart';
 
 /// Service for handling alarm notifications (sound, vibration).
 class NotificationService {
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
   bool _initialized = false;
+  Timer? _vibrationTimer;
+  Timer? _soundTimer;
+  bool _isAlarmActive = false;
+
+  // Constants for timing
+  static const Duration _vibrationInterval = Duration(seconds: 2);
+  static const Duration _soundInterval = Duration(seconds: 3);
 
   /// Initializes the notification service.
   Future<void> initialize() async {
@@ -46,54 +54,88 @@ class NotificationService {
   }
 
   /// Triggers an alarm notification based on settings.
+  /// Starts continuous vibration/sound if not already active.
   Future<void> triggerAlarm(AlarmEvent alarm, AppSettings settings) async {
     logger.i('Triggering alarm: ${alarm.type} at ${alarm.distanceFromAnchor.toStringAsFixed(1)}m');
 
-    // Sound notification
-    if (settings.soundEnabled) {
-      await _playSound();
-    }
-
-    // Vibration
-    if (settings.vibrationEnabled) {
-      await _vibrate();
+    // Start continuous alarm if not already active
+    if (!_isAlarmActive) {
+      _isAlarmActive = true;
+      
+      // Start continuous vibration
+      if (settings.vibrationEnabled) {
+        _startContinuousVibration();
+      }
+      
+      // Start continuous sound
+      if (settings.soundEnabled) {
+        _startContinuousSound();
+      }
     }
 
     // Local notification (always show for visibility)
-    await _showLocalNotification(alarm);
+    await _showLocalNotification(alarm, settings);
+  }
+  
+  /// Stops all alarm notifications (vibration and sound).
+  void stopAlarm() {
+    _isAlarmActive = false;
+    _vibrationTimer?.cancel();
+    _vibrationTimer = null;
+    _soundTimer?.cancel();
+    _soundTimer = null;
+    logger.d('Alarm notifications stopped');
   }
 
-  /// Plays alarm sound.
-  Future<void> _playSound() async {
-    try {
-      // Use system sound for alarm
-      await SystemSound.play(SystemSoundType.alert);
-      logger.d('Alarm sound played');
-    } catch (e) {
-      logger.w('Failed to play alarm sound: $e');
-    }
-  }
+  /// Starts continuous vibration pattern while alarm is active.
+  void _startContinuousVibration() {
+    _vibrationTimer?.cancel();
+    
+    // Vibrate immediately
+    HapticFeedback.vibrate();
 
-  /// Triggers device vibration.
-  Future<void> _vibrate() async {
-    try {
-      // Vibrate pattern: vibrate for 500ms, pause 200ms, vibrate 500ms
-      await HapticFeedback.vibrate();
-      
-      // For longer vibration pattern, use a timer
-      Timer(const Duration(milliseconds: 700), () {
+    // Repeat vibration pattern while alarm is active
+    _vibrationTimer = Timer.periodic(_vibrationInterval, (timer) {
+      if (!_isAlarmActive) {
+        timer.cancel();
+        return;
+      }
+      try {
         HapticFeedback.vibrate();
-      });
-      
-      logger.d('Vibration triggered');
-    } catch (e) {
-      logger.w('Failed to vibrate: $e');
-    }
+      } catch (e) {
+        logger.w('Failed to vibrate: $e');
+      }
+    });
+    
+    logger.d('Continuous vibration started');
+  }
+
+  /// Starts continuous sound pattern while alarm is active.
+  void _startContinuousSound() {
+    _soundTimer?.cancel();
+    
+    // Play sound immediately
+    SystemSound.play(SystemSoundType.alert);
+
+    // Repeat sound while alarm is active
+    _soundTimer = Timer.periodic(_soundInterval, (timer) {
+      if (!_isAlarmActive) {
+        timer.cancel();
+        return;
+      }
+      try {
+        SystemSound.play(SystemSoundType.alert);
+      } catch (e) {
+        logger.w('Failed to play alarm sound: $e');
+      }
+    });
+    
+    logger.d('Continuous sound started');
   }
 
 
   /// Shows a local notification for the alarm.
-  Future<void> _showLocalNotification(AlarmEvent alarm) async {
+  Future<void> _showLocalNotification(AlarmEvent alarm, AppSettings settings) async {
     if (!_initialized) {
       await initialize();
     }
@@ -127,7 +169,7 @@ class NotificationService {
       case AlarmType.driftExceeded:
         title = 'Anchor Alarm';
         body =
-            'Boat has drifted ${alarm.distanceFromAnchor.toStringAsFixed(1)}m from anchor';
+            'Boat has drifted ${formatDistance(alarm.distanceFromAnchor, settings.unitSystem)} from anchor';
         break;
       case AlarmType.gpsLost:
         title = 'GPS Lost';
@@ -162,7 +204,8 @@ class NotificationService {
 
   /// Disposes resources.
   void dispose() {
-    // No resources to dispose
+    stopAlarm();
+    _notifications.cancelAll();
   }
 }
 

@@ -17,6 +17,7 @@ class AppSettings {
   final AppThemeMode themeMode;
   final double defaultRadius;
   final double alarmSensitivity;
+  final double gpsAccuracyThreshold; // Meters - GPS accuracy worse than this triggers warning
   final String? worldTidesApiKey; // WorldTides API key for tide data
   final bool soundEnabled;
   final bool vibrationEnabled;
@@ -26,16 +27,21 @@ class AppSettings {
     this.themeMode = AppThemeMode.system,
     this.defaultRadius = 50.0,
     this.alarmSensitivity = 0.5,
+    this.gpsAccuracyThreshold = 20.0, // Default: warn if GPS accuracy > 20m
     this.worldTidesApiKey = '40a47278-06b2-4f97-a7ca-0f7fa8962b63', // Default API key
     this.soundEnabled = true,
     this.vibrationEnabled = true,
-  }) : assert(
-          defaultRadius >= 20 && defaultRadius <= 100,
-          'Default radius must be between 20 and 100 meters, got $defaultRadius',
+  }) :         assert(
+          defaultRadius >= 1 && defaultRadius <= 100,
+          'Default radius must be between 1 and 100 meters, got $defaultRadius',
         ),
         assert(
           alarmSensitivity >= 0 && alarmSensitivity <= 1,
           'Alarm sensitivity must be between 0 and 1, got $alarmSensitivity',
+        ),
+        assert(
+          gpsAccuracyThreshold > 0,
+          'GPS accuracy threshold must be positive, got $gpsAccuracyThreshold',
         );
 
   /// Creates AppSettings from JSON map.
@@ -51,6 +57,7 @@ class AppSettings {
       ),
       defaultRadius: (json['defaultRadius'] as num?)?.toDouble() ?? 50.0,
       alarmSensitivity: (json['alarmSensitivity'] as num?)?.toDouble() ?? 0.5,
+      gpsAccuracyThreshold: (json['gpsAccuracyThreshold'] as num?)?.toDouble() ?? 20.0,
       worldTidesApiKey: json['worldTidesApiKey'] as String? ?? '40a47278-06b2-4f97-a7ca-0f7fa8962b63',
       soundEnabled: json['soundEnabled'] as bool? ?? true,
       vibrationEnabled: json['vibrationEnabled'] as bool? ?? true,
@@ -64,6 +71,7 @@ class AppSettings {
       'themeMode': themeMode.name,
       'defaultRadius': defaultRadius,
       'alarmSensitivity': alarmSensitivity,
+      'gpsAccuracyThreshold': gpsAccuracyThreshold,
       'worldTidesApiKey': worldTidesApiKey,
       'soundEnabled': soundEnabled,
       'vibrationEnabled': vibrationEnabled,
@@ -76,6 +84,7 @@ class AppSettings {
     AppThemeMode? themeMode,
     double? defaultRadius,
     double? alarmSensitivity,
+    double? gpsAccuracyThreshold,
     String? worldTidesApiKey,
     bool? soundEnabled,
     bool? vibrationEnabled,
@@ -85,6 +94,7 @@ class AppSettings {
       themeMode: themeMode ?? this.themeMode,
       defaultRadius: defaultRadius ?? this.defaultRadius,
       alarmSensitivity: alarmSensitivity ?? this.alarmSensitivity,
+      gpsAccuracyThreshold: gpsAccuracyThreshold ?? this.gpsAccuracyThreshold,
       worldTidesApiKey: worldTidesApiKey ?? this.worldTidesApiKey,
       soundEnabled: soundEnabled ?? this.soundEnabled,
       vibrationEnabled: vibrationEnabled ?? this.vibrationEnabled,
@@ -99,6 +109,7 @@ class AppSettings {
         other.themeMode == themeMode &&
         other.defaultRadius == defaultRadius &&
         other.alarmSensitivity == alarmSensitivity &&
+        other.gpsAccuracyThreshold == gpsAccuracyThreshold &&
         other.worldTidesApiKey == worldTidesApiKey &&
         other.soundEnabled == soundEnabled &&
         other.vibrationEnabled == vibrationEnabled;
@@ -111,6 +122,7 @@ class AppSettings {
       themeMode,
       defaultRadius,
       alarmSensitivity,
+      gpsAccuracyThreshold,
       worldTidesApiKey,
       soundEnabled,
       vibrationEnabled,

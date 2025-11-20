@@ -7,10 +7,17 @@ enum AlarmType {
   gpsInaccurate,
 }
 
+/// Severity level for alarm events.
+enum Severity {
+  alarm,   // Critical - requires immediate attention (e.g., drift exceeded)
+  warning, // Informational - user should be aware but not critical (e.g., GPS issues)
+}
+
 /// Records when an alarm is triggered (drift beyond radius).
 class AlarmEvent {
   final String id;
   final AlarmType type;
+  final Severity severity;
   final DateTime timestamp;
   final double latitude;
   final double longitude;
@@ -21,6 +28,7 @@ class AlarmEvent {
   AlarmEvent({
     required this.id,
     required this.type,
+    required this.severity,
     required this.timestamp,
     required this.latitude,
     required this.longitude,
@@ -53,6 +61,10 @@ class AlarmEvent {
         (e) => e.name == data['type'],
         orElse: () => AlarmType.driftExceeded,
       ),
+      severity: Severity.values.firstWhere(
+        (e) => e.name == (data['severity'] as String? ?? 'alarm'),
+        orElse: () => Severity.alarm,
+      ),
       timestamp: (data['timestamp'] as Timestamp).toDate(),
       latitude: data['latitude'] as double,
       longitude: data['longitude'] as double,
@@ -69,6 +81,7 @@ class AlarmEvent {
     return {
       'id': id,
       'type': type.name,
+      'severity': severity.name,
       'timestamp': Timestamp.fromDate(timestamp),
       'latitude': latitude,
       'longitude': longitude,
@@ -83,6 +96,7 @@ class AlarmEvent {
   AlarmEvent copyWith({
     String? id,
     AlarmType? type,
+    Severity? severity,
     DateTime? timestamp,
     double? latitude,
     double? longitude,
@@ -93,6 +107,7 @@ class AlarmEvent {
     return AlarmEvent(
       id: id ?? this.id,
       type: type ?? this.type,
+      severity: severity ?? this.severity,
       timestamp: timestamp ?? this.timestamp,
       latitude: latitude ?? this.latitude,
       longitude: longitude ?? this.longitude,
@@ -108,6 +123,7 @@ class AlarmEvent {
     return other is AlarmEvent &&
         other.id == id &&
         other.type == type &&
+        other.severity == severity &&
         other.timestamp == timestamp &&
         other.latitude == latitude &&
         other.longitude == longitude &&
@@ -121,6 +137,7 @@ class AlarmEvent {
     return Object.hash(
       id,
       type,
+      severity,
       timestamp,
       latitude,
       longitude,

@@ -40,7 +40,7 @@ class AlarmService {
     return distanceFromAnchor > effectiveRadius;
   }
 
-  /// Creates an alarm event for drift exceeded.
+  /// Creates an alarm event for drift exceeded (severity: alarm).
   AlarmEvent createDriftAlarm(
     Anchor anchor,
     PositionUpdate position,
@@ -49,6 +49,7 @@ class AlarmService {
     return AlarmEvent(
       id: _generateAlarmId(),
       type: AlarmType.driftExceeded,
+      severity: Severity.alarm,
       timestamp: position.timestamp,
       latitude: position.latitude,
       longitude: position.longitude,
@@ -56,11 +57,12 @@ class AlarmService {
     );
   }
 
-  /// Creates an alarm event for GPS lost.
-  AlarmEvent createGpsLostAlarm(PositionUpdate? lastPosition) {
+  /// Creates a warning event for GPS lost (severity: warning).
+  AlarmEvent createGpsLostWarning(PositionUpdate? lastPosition) {
     return AlarmEvent(
       id: _generateAlarmId(),
       type: AlarmType.gpsLost,
+      severity: Severity.warning,
       timestamp: DateTime.now(),
       latitude: lastPosition?.latitude ?? 0.0,
       longitude: lastPosition?.longitude ?? 0.0,
@@ -68,14 +70,14 @@ class AlarmService {
     );
   }
 
-  /// Creates an alarm event for GPS inaccurate.
-  AlarmEvent createGpsInaccurateAlarm(
+  /// Creates a warning event for GPS inaccurate (severity: warning).
+  AlarmEvent createGpsInaccurateWarning(
     PositionUpdate position,
-    double minRequiredAccuracy,
   ) {
     return AlarmEvent(
       id: _generateAlarmId(),
       type: AlarmType.gpsInaccurate,
+      severity: Severity.warning,
       timestamp: position.timestamp,
       latitude: position.latitude,
       longitude: position.longitude,
