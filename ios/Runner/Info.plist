@@ -45,10 +45,30 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
-	<!-- Location permissions for GPS tracking -->
+	<!-- Location permissions for GPS tracking with maximum accuracy -->
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Anchor Alarm needs your location to monitor anchor drift and alert you if your boat moves beyond the safe radius.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Anchor Alarm needs your location to monitor anchor drift and alert you if your boat moves beyond the safe radius.</string>
+	<string>Anchor Alarm needs continuous location access to monitor your anchor position and alert you to drift even when the app is in the background.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>Anchor Alarm requires background location access for continuous anchor monitoring and drift detection.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
+	<!-- Deep linking for monitoring session join -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.anchoralarm.deeplink</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>anchorapp</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

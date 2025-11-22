@@ -2,6 +2,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/anchor.dart';
 import '../repositories/local_storage_repository.dart';
 import 'local_storage_provider.dart';
+import 'alarm_provider.dart';
+import '../utils/logger_setup.dart';
 
 /// Provides the current anchor state.
 final anchorProvider = NotifierProvider<AnchorNotifier, Anchor?>(() {
@@ -14,9 +16,8 @@ class AnchorNotifier extends Notifier<Anchor?> {
 
   @override
   Anchor? build() {
-    // Load anchor synchronously on first build
-    final anchor = _repository.getAnchor();
-    return anchor;
+    // Start fresh - no anchor persistence
+    return null;
   }
 
   /// Sets a new anchor point.
@@ -34,7 +35,6 @@ class AnchorNotifier extends Notifier<Anchor?> {
       isActive: true,
     );
 
-    await _repository.saveAnchor(anchor);
     state = anchor;
   }
 
@@ -53,7 +53,6 @@ class AnchorNotifier extends Notifier<Anchor?> {
       updatedAt: DateTime.now(),
     );
 
-    await _repository.saveAnchor(updatedAnchor);
     state = updatedAnchor;
   }
 
@@ -70,8 +69,14 @@ class AnchorNotifier extends Notifier<Anchor?> {
 
   /// Clears the anchor.
   Future<void> clearAnchor() async {
+    logger.i('Clearing anchor and stopping monitoring');
     await _repository.deleteAnchor();
     state = null;
+
+    // Stop monitoring when anchor is cleared
+    logger.i('Stopping monitoring due to anchor clear');
+    ref.read(activeAlarmsProvider.notifier).stopMonitoring();
+    logger.i('Anchor cleared successfully');
   }
 
   /// Toggles anchor active state.

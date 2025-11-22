@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import '../../providers/pairing_provider.dart';
+import '../../providers/pairing_session_provider.dart';
 import '../../utils/logger_setup.dart';
 
 /// Screen for scanning QR code to join a pairing session.
@@ -16,6 +17,15 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
   final MobileScannerController _controller = MobileScannerController();
   bool _isJoining = false;
   String? _scannedToken;
+  DateTime? _lastScanTime;
+
+  /// Validates if a string looks like a valid session token format.
+  bool _isValidSessionTokenFormat(String token) {
+    if (token.length != 32) {
+      return false;
+    }
+    return RegExp(r'^[A-Z0-9]+$').hasMatch(token);
+  }
 
   @override
   void dispose() {
@@ -25,6 +35,9 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final pairingState = ref.watch(pairingSessionStateProvider);
+    logger.i('PairingScanScreen: Building screen, pairingState.role=${pairingState.role}, isPrimary=${pairingState.isPrimary}, sessionToken=${pairingState.sessionToken}');
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Scan QR Code'),
@@ -89,6 +102,13 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
       return; // Already processing
     }
 
+    // Prevent processing the same token multiple times rapidly
+    final now = DateTime.now();
+    if (_lastScanTime != null && now.difference(_lastScanTime!) < const Duration(seconds: 2)) {
+      return; // Too soon after last scan
+    }
+    _lastScanTime = now;
+
     final barcodes = capture.barcodes;
     if (barcodes.isEmpty) {
       return;
@@ -100,7 +120,70 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
       return;
     }
 
-    final token = rawValue.trim();
+    logger.i('QR Code scanned: $rawValue');
+
+    // Early validation for obviously invalid codes
+    if (rawValue.length < 10) {
+      logger.d('Ignoring very short code: "$rawValue"');
+      return;
+    }
+
+    // Parse deep link or token
+    String? token;
+    if (rawValue.startsWith('anchorapp://join')) {
+      logger.i('Detected deep link format');
+      // Parse deep link: anchorapp://join?sessionId=...&token=...
+      final uri = Uri.parse(rawValue);
+      token = uri.queryParameters['token'] ?? uri.queryParameters['sessionId'];
+      logger.i('Extracted token from deep link: $token');
+    } else {
+      logger.i('Detected direct token format');
+      // Direct token - only accept if it looks like a valid session token
+      final trimmed = rawValue.trim();
+      if (_isValidSessionTokenFormat(trimmed)) {
+        token = trimmed;
+        logger.i('Accepted direct token: $token');
+      } else {
+        logger.w('Rejected invalid token format: "$trimmed"');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Invalid QR code - not a valid session token'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    if (token == null || token.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Invalid QR code format'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return;
+    }
+
+    // Check if trying to join our own session
+    final pairingState = ref.read(pairingSessionStateProvider);
+    if (pairingState.sessionToken == token) {
+      logger.w('Cannot join own session - device is already primary of session $token');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Cannot join your own session'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+
     _scannedToken = token;
     _joinSession(token);
   }
@@ -111,16 +194,16 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
     });
 
     try {
-      final notifier = ref.read(pairingSessionProvider.notifier);
-      await notifier.joinSession(token);
+      final pairingNotifier = ref.read(pairingSessionStateProvider.notifier);
+      await pairingNotifier.joinSecondarySession(token);
       
-      logger.i('Successfully joined session: $token');
+      logger.i('Successfully joined monitoring session: $token');
       
       if (mounted) {
-        Navigator.of(context).pop(); // Return to pairing screen
+        Navigator.of(context).popUntil((route) => route.isFirst); // Return to map screen
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Successfully joined pairing session!'),
+            content: Text('Successfully joined paired session!'),
             backgroundColor: Colors.green,
           ),
         );

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/alarm_event.dart';
 import '../models/position_update.dart';
+import '../models/anchor.dart';
 import '../services/alarm_service.dart';
 import '../services/notification_service.dart';
 import '../services/background_alarm_service.dart';
@@ -11,11 +12,33 @@ import 'anchor_provider.dart';
 import 'position_provider.dart';
 import 'notification_service_provider.dart';
 import 'settings_provider.dart';
+import 'firestore_provider.dart';
+import 'pairing_session_provider.dart';
 
 /// Provides active alarms state.
 final activeAlarmsProvider = NotifierProvider<AlarmNotifier, List<AlarmEvent>>(() {
   return AlarmNotifier();
 });
+
+/// Provides the monitoring state reactively.
+/// This allows the UI to react to changes in monitoring status.
+final alarmMonitoringStateProvider = NotifierProvider<AlarmMonitoringStateNotifier, bool>(() {
+  return AlarmMonitoringStateNotifier();
+});
+
+/// Notifier that tracks whether alarm monitoring is active.
+class AlarmMonitoringStateNotifier extends Notifier<bool> {
+  @override
+  bool build() {
+    // Initialize to false by default - monitoring should only be active when explicitly started
+    return false;
+  }
+
+  /// Updates the monitoring state.
+  void setMonitoring(bool isMonitoring) {
+    state = isMonitoring;
+  }
+}
 
 /// Notifier for alarm state management.
 class AlarmNotifier extends Notifier<List<AlarmEvent>> {
@@ -82,6 +105,7 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
       // Stop monitoring if active
       if (_isMonitoring) {
         _isMonitoring = false;
+        ref.read(alarmMonitoringStateProvider.notifier).setMonitoring(false);
         logger.i('Monitoring stopped during provider disposal');
       }
     });
@@ -115,14 +139,24 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
   }
 
   /// Starts monitoring for alarm conditions.
+  /// Only works if there's an active anchor set.
   void startMonitoring() {
-    if (_isMonitoring) {
-      logger.d('Monitoring already active, skipping start');
-      return; // Already monitoring
+    // Check if we have an anchor before starting monitoring
+    final anchor = ref.read(anchorProvider);
+    if (anchor == null || !anchor.isActive) {
+      logger.w('Cannot start monitoring: no active anchor set');
+      return;
     }
 
-    logger.i('Starting alarm monitoring');
+    if (_isMonitoring) {
+      logger.d('Monitoring already active, skipping start');
+      return;
+    }
+
+    logger.i('Starting alarm monitoring for anchor at ${anchor.latitude}, ${anchor.longitude}');
     _isMonitoring = true;
+    // Update reactive monitoring state
+    ref.read(alarmMonitoringStateProvider.notifier).setMonitoring(true);
 
     try {
       // Initialize GPS status tracking
@@ -153,6 +187,7 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
     } catch (e, stackTrace) {
       logger.e('Failed to start monitoring', error: e, stackTrace: stackTrace);
       _isMonitoring = false;
+      ref.read(alarmMonitoringStateProvider.notifier).setMonitoring(false);
       rethrow;
     }
   }
@@ -164,13 +199,15 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
       return;
     }
     
-    logger.i('Stopping alarm monitoring...');
+    logger.i('Stopping alarm monitoring');
     _isMonitoring = false;
     _checkTimer?.cancel();
     _checkTimer = null;
     
     // Stop background service
     _backgroundService.stopMonitoring();
+    // Update reactive monitoring state
+    ref.read(alarmMonitoringStateProvider.notifier).setMonitoring(false);
     logger.i('Alarm monitoring stopped');
   }
 
@@ -368,13 +405,26 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
   }
 
   /// Acknowledges an alarm (for manual dismiss - stops monitoring for alarms only).
-  void acknowledgeAlarm(String alarmId) {
+  Future<void> acknowledgeAlarm(String alarmId) async {
     AlarmEvent? alarm;
     try {
       alarm = state.firstWhere((a) => a.id == alarmId);
     } catch (e) {
       logger.w('Attempted to acknowledge non-existent alarm: $alarmId');
       return; // Already dismissed or doesn't exist
+    }
+
+    // Sync dismissal to Firebase first (for paired devices)
+    final pairingState = ref.read(pairingSessionStateProvider);
+    if (pairingState.isPrimary && pairingState.sessionToken != null) {
+      try {
+        final firestore = ref.read(firestoreRepositoryProvider);
+        await firestore.acknowledgeAlarm(pairingState.sessionToken!, alarmId);
+        logger.i('Synced alarm dismissal to Firebase: $alarmId');
+      } catch (e) {
+        logger.e('Failed to sync alarm dismissal to Firebase', error: e);
+        // Continue with local dismissal even if Firebase sync fails
+      }
     }
 
     // Only stop monitoring for alarms (not warnings)

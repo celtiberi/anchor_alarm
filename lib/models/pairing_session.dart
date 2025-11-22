@@ -88,10 +88,25 @@ class PairingSession {
   }
 
   /// Adds a device to the session.
+  /// If the device already exists, updates its joinedAt timestamp (allows re-joining).
   PairingSession addDevice(DeviceInfo device) {
-    if (devices.any((d) => d.deviceId == device.deviceId)) {
-      throw StateError('Device ${device.deviceId} already exists in session');
+    final existingDeviceIndex = devices.indexWhere((d) => d.deviceId == device.deviceId);
+    
+    if (existingDeviceIndex >= 0) {
+      // Device already exists - update it with new joinedAt timestamp (re-joining)
+      final updatedDevices = List<DeviceInfo>.from(devices);
+      updatedDevices[existingDeviceIndex] = device;
+      return PairingSession(
+        token: token,
+        primaryDeviceId: primaryDeviceId,
+        devices: updatedDevices,
+        createdAt: createdAt,
+        expiresAt: expiresAt,
+        isActive: isActive,
+      );
     }
+    
+    // New device - add it
     return PairingSession(
       token: token,
       primaryDeviceId: primaryDeviceId,

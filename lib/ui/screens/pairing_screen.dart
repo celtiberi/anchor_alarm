@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../providers/pairing_provider.dart';
+import '../../providers/pairing_session_provider.dart';
 import '../../models/pairing_session.dart';
+import '../../models/device_info.dart';
 import '../../utils/logger_setup.dart';
 import 'pairing_scan_screen.dart';
 
@@ -18,10 +21,34 @@ class PairingScreen extends ConsumerStatefulWidget {
 class _PairingScreenState extends ConsumerState<PairingScreen> {
   bool _isCreating = false;
 
+  /// Converts Firebase session data Map to PairingSession object
+  PairingSession _mapToPairingSession(Map<String, dynamic> data) {
+    return PairingSession(
+      token: data['token'] as String? ?? '',
+      primaryDeviceId: data['primaryDeviceId'] as String? ?? '',
+      devices: (data['devices'] as List<dynamic>? ?? [])
+          .map((d) => DeviceInfo.fromFirestore(d as Map<String, dynamic>))
+          .toList(),
+      createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      expiresAt: (data['expiresAt'] as Timestamp?)?.toDate() ?? DateTime.now().add(const Duration(hours: 24)),
+      isActive: data['isActive'] as bool? ?? true,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final session = ref.watch(pairingSessionProvider);
-    final notifier = ref.read(pairingSessionProvider.notifier);
+    final sessionAsync = ref.watch(effectiveSessionProvider);
+    final sessionData = sessionAsync.maybeWhen(
+      data: (data) => data,
+      orElse: () => <String, dynamic>{},
+    );
+
+    // Convert Map to PairingSession if we have data
+    final PairingSession? session = sessionData.isNotEmpty ? _mapToPairingSession(sessionData) : null;
+
+    final pairingNotifier = ref.read(pairingSessionProvider.notifier);
+    final pairingState = ref.watch(pairingSessionStateProvider);
+    final sessionNotifier = ref.read(pairingSessionStateProvider.notifier);
 
     return Scaffold(
       appBar: AppBar(
@@ -42,12 +69,15 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
         ],
       ),
       body: session == null
-          ? _buildCreateSessionView(notifier)
-          : _buildSessionView(session, notifier),
+          ? _buildCreateSessionView(pairingNotifier, sessionNotifier)
+          : _buildSessionView(session, pairingNotifier, sessionNotifier),
     );
   }
 
-  Widget _buildCreateSessionView(PairingSessionNotifier notifier) {
+  Widget _buildCreateSessionView(
+    PairingSessionNotifier pairingNotifier,
+    PairingSessionStateNotifier sessionNotifier,
+  ) {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24.0),
@@ -61,7 +91,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
             ),
             const SizedBox(height: 24),
             const Text(
-              'Start Pairing',
+              'Share Monitoring',
               style: TextStyle(
                 fontSize: 24,
                 fontWeight: FontWeight.bold,
@@ -69,7 +99,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
             ),
             const SizedBox(height: 16),
             const Text(
-              'Create a pairing session to allow other devices to monitor your anchor position.',
+              'Create a monitoring session to allow other devices to monitor your anchor position in real-time.',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 16),
             ),
@@ -82,7 +112,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                         _isCreating = true;
                       });
                       try {
-                        await notifier.createSession();
+                        await sessionNotifier.startPrimarySession();
                       } catch (e, stackTrace) {
                         logger.e(
                           'Failed to create session',
@@ -141,8 +171,11 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
   Widget _buildSessionView(
     PairingSession session,
-    PairingSessionNotifier notifier,
+    PairingSessionNotifier pairingNotifier,
+    PairingSessionStateNotifier sessionNotifier,
   ) {
+    // Generate deep link for QR code
+    final deepLink = 'anchorapp://join?sessionId=${session.token}&token=${session.token}';
     return SingleChildScrollView(
       child: Padding(
         padding: const EdgeInsets.all(24.0),
@@ -173,7 +206,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 ],
               ),
               child: QrImageView(
-                data: session.token,
+                data: deepLink,
                 version: QrVersions.auto,
                 size: 300,
                 backgroundColor: Colors.white,
@@ -203,17 +236,37 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    TextButton.icon(
-                      onPressed: () {
-                        Clipboard.setData(ClipboardData(text: session.token));
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Token copied to clipboard'),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextButton.icon(
+                            onPressed: () {
+                              Clipboard.setData(ClipboardData(text: deepLink));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Deep link copied to clipboard'),
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.copy),
+                            label: const Text('Copy Link'),
                           ),
-                        );
-                      },
-                      icon: const Icon(Icons.copy),
-                      label: const Text('Copy Token'),
+                        ),
+                        Expanded(
+                          child: TextButton.icon(
+                            onPressed: () {
+                              Clipboard.setData(ClipboardData(text: session.token));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Token copied to clipboard'),
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.copy),
+                            label: const Text('Copy Token'),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -273,7 +326,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 );
 
                 if (confirmed == true) {
-                  await notifier.endSession();
+                  await sessionNotifier.endSession();
                 }
               },
               icon: const Icon(Icons.close),

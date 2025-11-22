@@ -7,6 +7,7 @@ import '../models/app_settings.dart';
 class LocalStorageRepository {
   static const String _settingsBoxName = 'settings';
   static const String _anchorBoxName = 'anchor'; // Reserved for future use
+  static const String _sessionBoxName = 'monitoring_session';
 
   /// Initializes Hive boxes.
   Future<void> initialize() async {
@@ -23,6 +24,11 @@ class LocalStorageRepository {
     // Open tide cache box
     if (!Hive.isBoxOpen('tide_cache')) {
       await Hive.openBox('tide_cache');
+    }
+    
+    // Open monitoring session box
+    if (!Hive.isBoxOpen(_sessionBoxName)) {
+      await Hive.openBox(_sessionBoxName);
     }
   }
 
@@ -100,6 +106,38 @@ class LocalStorageRepository {
       (e) => e.name == value,
       orElse: () => AppThemeMode.system,
     );
+  }
+
+  /// Saves monitoring session token to local storage.
+  Future<void> saveMonitoringSessionToken(String? token) async {
+    final box = Hive.box(_sessionBoxName);
+    if (token == null) {
+      await box.delete('sessionToken');
+    } else {
+      await box.put('sessionToken', token);
+    }
+  }
+
+  /// Gets the saved monitoring session token from local storage.
+  String? getMonitoringSessionToken() {
+    final box = Hive.box(_sessionBoxName);
+    return box.get('sessionToken') as String?;
+  }
+
+  /// Saves device role (primary/secondary) to local storage.
+  Future<void> saveDeviceRole(String? role) async {
+    final box = Hive.box(_sessionBoxName);
+    if (role == null) {
+      await box.delete('deviceRole');
+    } else {
+      await box.put('deviceRole', role);
+    }
+  }
+
+  /// Gets the saved device role from local storage.
+  String? getDeviceRole() {
+    final box = Hive.box(_sessionBoxName);
+    return box.get('deviceRole') as String?;
   }
 }
 

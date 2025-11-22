@@ -20,47 +20,79 @@ class PairingSessionNotifier extends Notifier<PairingSession?> {
   FirestoreRepository get _firestore => ref.read(firestoreRepositoryProvider);
   PairingService get _pairingService => ref.read(pairingServiceProvider);
   String? _deviceId;
+  Future<String>? _deviceIdFuture;
 
   @override
   PairingSession? build() {
+    // Pre-load device ID for better performance
     _loadDeviceId();
     return null;
   }
 
-  /// Loads or generates device ID.
+  /// Loads or generates device ID asynchronously and caches the result.
   Future<void> _loadDeviceId() async {
     if (_deviceId != null) {
       return;
     }
 
+    // If we're already loading, wait for the existing future
+    if (_deviceIdFuture != null) {
+      await _deviceIdFuture;
+      return;
+    }
+
+    _deviceIdFuture = _getDeviceId();
+    await _deviceIdFuture;
+  }
+
+  Future<String> _getDeviceId() async {
     try {
       final deviceInfo = DeviceInfoPlugin();
+      String deviceId;
+
       if (Platform.isAndroid) {
         final androidInfo = await deviceInfo.androidInfo;
-        _deviceId = androidInfo.id;
+        deviceId = androidInfo.id;
       } else if (Platform.isIOS) {
         final iosInfo = await deviceInfo.iosInfo;
-        _deviceId = iosInfo.identifierForVendor;
+        deviceId = iosInfo.identifierForVendor ?? 'unknown_ios_${DateTime.now().millisecondsSinceEpoch}';
       } else {
-        _deviceId = 'unknown_${DateTime.now().millisecondsSinceEpoch}';
+        deviceId = 'unknown_${DateTime.now().millisecondsSinceEpoch}';
       }
-      logger.i('Device ID: $_deviceId');
+
+      _deviceId = deviceId;
+      logger.i('💡 Device ID: $deviceId');
+      return deviceId;
     } catch (e) {
       logger.e('Failed to get device ID', error: e);
       _deviceId = 'unknown_${DateTime.now().millisecondsSinceEpoch}';
+      return _deviceId!;
     }
   }
 
   /// Creates a new pairing session as primary device.
   Future<PairingSession> createSession() async {
-    await _loadDeviceId();
-    
+    // Ensure device ID is loaded
+    if (_deviceId == null) {
+      if (_deviceIdFuture != null) {
+        // Wait for existing load to complete
+        await _deviceIdFuture;
+      } else {
+        // Start loading device ID
+        await _loadDeviceId();
+      }
+    }
+
+    if (_deviceId == null) {
+      throw StateError('Device ID not available');
+    }
+
     final session = _pairingService.createSession(_deviceId!);
-    
+
     try {
       await _firestore.createSession(session);
       state = session;
-      logger.i('Pairing session created and saved: ${session.token}');
+      logger.i('💡 Pairing session created and saved: ${session.token}');
       return session;
     } catch (e) {
       logger.e('Failed to create session in Firestore', error: e);
@@ -70,9 +102,22 @@ class PairingSessionNotifier extends Notifier<PairingSession?> {
 
   /// Joins an existing session as secondary device.
   Future<void> joinSession(String token) async {
-    await _loadDeviceId();
+    // Ensure device ID is loaded
+    if (_deviceId == null) {
+      if (_deviceIdFuture != null) {
+        await _deviceIdFuture;
+      } else {
+        await _loadDeviceId();
+      }
+    }
+
+    if (_deviceId == null) {
+      throw StateError('Device ID not available');
+    }
     
+    logger.i('Validating token format: "$token" (length: ${token.length})');
     if (!_pairingService.isValidTokenFormat(token)) {
+      logger.e('Token validation failed for: "$token"');
       throw ArgumentError('Invalid session token format');
     }
 
@@ -126,7 +171,33 @@ class PairingSessionNotifier extends Notifier<PairingSession?> {
     }
   }
 
-  /// Gets device ID.
-  String? get deviceId => _deviceId;
+  /// Gets the device ID for this device, loading it if necessary.
+  Future<String> get deviceId async {
+    if (_deviceId != null) {
+      return _deviceId!;
+    }
+
+    await _loadDeviceId();
+    return _deviceId!;
+  }
+
+  /// Ensures device ID is loaded and returns it.
+  Future<String> ensureDeviceId() async {
+    if (_deviceId != null) {
+      return _deviceId!;
+    }
+
+    if (_deviceIdFuture != null) {
+      await _deviceIdFuture;
+    } else {
+      await _loadDeviceId();
+    }
+
+    if (_deviceId == null) {
+      throw StateError('Failed to load device ID');
+    }
+
+    return _deviceId!;
+  }
 }
 

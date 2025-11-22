@@ -9,6 +9,12 @@ import '../../providers/anchor_provider.dart';
 import '../../providers/position_provider.dart';
 import '../../providers/position_history_provider.dart';
 import '../../providers/settings_provider.dart';
+import '../../providers/pairing_session_provider.dart';
+import '../../providers/remote_anchor_provider.dart';
+import '../../providers/remote_position_provider.dart';
+import '../../providers/remote_position_history_provider.dart';
+import '../../providers/remote_alarm_provider.dart';
+import '../../providers/remote_monitoring_status_provider.dart';
 import '../../models/anchor.dart';
 import '../../models/position_update.dart';
 import '../../models/alarm_event.dart';
@@ -53,12 +59,13 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   void didChangeDependencies() {
     super.didChangeDependencies();
 
-    // Safely start position monitoring when dependencies are available
-    if (!_positionMonitoringStarted) {
+    // Only start GPS monitoring for primary devices (secondary devices get position from primary via Firebase)
+    final monitoringState = ref.read(pairingSessionStateProvider);
+    if (!_positionMonitoringStarted && !monitoringState.isSecondary) {
       try {
         ref.read(positionProvider.notifier).startMonitoring();
         _positionMonitoringStarted = true;
-        logger.i('Started position monitoring');
+        logger.i('Started position monitoring for primary device');
       } catch (e, stackTrace) {
         logger.e('Failed to start position monitoring', error: e, stackTrace: stackTrace);
       }
@@ -138,7 +145,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     );
   }
 
-  Widget _buildInfoCard(Anchor? anchor, PositionUpdate? position, AppSettings settings, bool isMonitoring) {
+  Widget _buildInfoCard(Anchor? anchor, PositionUpdate? position, AppSettings settings, bool isMonitoring, PairingSessionState monitoringState) {
     return Card(
       elevation: 4,
       child: InkWell(
@@ -248,8 +255,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                     style: TextStyle(fontSize: 14),
                   ),
                 ],
-                // Raise anchor button - only shown when anchor is set
-                if (anchor != null) ...[
+                // Raise anchor button - only shown when anchor is set and on primary device
+                if (anchor != null && !monitoringState.isSecondary) ...[
                   const SizedBox(height: 16),
                   SizedBox(
                     width: double.infinity,
@@ -341,7 +348,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   final settings = ref.read(settingsProvider);
                   await _createAnchorFromPosition(position, settings);
                   await _adjustMapForNewAnchor();
-                  await _startMonitoringForNewAnchor(position, settings);
+                  _handleAnchorSet(position, settings);
                 } on TimeoutException catch (e) {
                   _handleTimeoutError(e);
                 } catch (e, stackTrace) {
@@ -499,22 +506,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
   }
 
-  Future<void> _startMonitoringForNewAnchor(PositionUpdate position, AppSettings settings) async {
-    try {
-      ref.read(activeAlarmsProvider.notifier).startMonitoring();
-      logger.i('Anchor set at ${position.latitude}, ${position.longitude} with zoom ${_calculateZoomForRadius(settings.defaultRadius)}');
-    } catch (e, stackTrace) {
-      logger.e('Failed to start monitoring after setting anchor', error: e, stackTrace: stackTrace);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Anchor set, but monitoring failed to start. Use "Restart Monitoring" button.'),
-            backgroundColor: Theme.of(context).colorScheme.error,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
-    }
+  void _handleAnchorSet(PositionUpdate position, AppSettings settings) {
+    logger.i('Anchor set at ${position.latitude}, ${position.longitude} with zoom ${_calculateZoomForRadius(settings.defaultRadius)}');
+    // Note: Monitoring is now started explicitly by user via button
   }
 
   void _handleTimeoutError(TimeoutException e) {
@@ -545,34 +539,87 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final anchor = ref.watch(anchorProvider);
-    final position = ref.watch(positionProvider);
-    final positionHistory = ref.watch(positionHistoryProvider);
+    final monitoringState = ref.watch(pairingSessionStateProvider);
+
+    // Use remote providers for secondary devices, local providers for primary/none
+    final anchorAsync = monitoringState.isSecondary
+        ? ref.watch(remoteAnchorProvider)
+        : AsyncValue.data(ref.watch(anchorProvider));
+    final positionAsync = monitoringState.isSecondary
+        ? ref.watch(remotePositionProvider)
+        : AsyncValue.data(ref.watch(positionProvider));
+    final positionHistoryAsync = monitoringState.isSecondary
+        ? ref.watch(remotePositionHistoryProvider)
+        : AsyncValue.data(ref.watch(positionHistoryProvider));
+    final alarmsAsync = monitoringState.isSecondary
+        ? ref.watch(remoteAlarmProvider)
+        : AsyncValue.data(ref.watch(activeAlarmsProvider));
+
     final settings = ref.watch(settingsProvider);
-    final alarms = ref.watch(activeAlarmsProvider);
-    final isMonitoring = ref.read(activeAlarmsProvider.notifier).isMonitoring;
+
+    // Extract values from async results
+    final anchor = anchorAsync.value;
+    final position = positionAsync.value;
+    final positionHistory = positionHistoryAsync.value ?? [];
+    final alarms = alarmsAsync.value ?? [];
+
+    // Determine monitoring status based on device role
+    final bool isMonitoring;
+    final pairingState = ref.watch(pairingSessionStateProvider);
+    if (pairingState.isSecondary) {
+      // For secondary devices, use remote monitoring status
+      final remoteMonitoringAsync = ref.watch(remoteMonitoringStatusProvider);
+      isMonitoring = remoteMonitoringAsync.value ?? false;
+    } else {
+      // For primary devices, use local monitoring status
+      isMonitoring = ref.read(activeAlarmsProvider.notifier).isMonitoring;
+    }
     final activeAlarms = alarms.where((a) => a.severity == Severity.alarm).toList();
     final activeWarnings = alarms.where((a) => a.severity == Severity.warning).toList();
 
-    // Set up listeners
-    ref.listen<Anchor?>(anchorProvider, (previous, next) {
+    // Listen for monitoring state changes to handle GPS monitoring
+    ref.listen<PairingSessionState>(pairingSessionStateProvider, (previous, next) {
+      // If device just became secondary, stop GPS monitoring
+      if (previous?.isSecondary != true && next.isSecondary) {
+        logger.i('Device became secondary - stopping local GPS monitoring');
+        ref.read(positionProvider.notifier).stopMonitoring();
+        _positionMonitoringStarted = false;
+      }
+      // If device just became primary, start GPS monitoring
+      else if (previous?.isPrimary != true && next.isPrimary && !_positionMonitoringStarted) {
+        logger.i('Device became primary - starting GPS monitoring');
+        try {
+          ref.read(positionProvider.notifier).startMonitoring();
+          _positionMonitoringStarted = true;
+        } catch (e) {
+          logger.e('Failed to start GPS monitoring when becoming primary', error: e);
+        }
+      }
+    });
+
+    // Auto-start monitoring when anchor is set (only for primary devices)
+    if (!monitoringState.isSecondary) {
+      ref.listen<Anchor?>(anchorProvider, (previous, next) {
+      // Only auto-start if transitioning from no anchor to having an anchor
       if (next != null && next.isActive && previous == null) {
         try {
           ref.read(activeAlarmsProvider.notifier).startMonitoring();
-          logger.i('Started monitoring on anchor set');
+          logger.i('Auto-started monitoring for new anchor');
         } catch (e, stackTrace) {
-          logger.e('Failed to start monitoring on anchor set', error: e, stackTrace: stackTrace);
+          logger.e('Failed to auto-start monitoring for new anchor', error: e, stackTrace: stackTrace);
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
-                content: Text('Failed to start monitoring: $e'),
+                content: Text('Anchor set, but monitoring failed to start. Use "Restart Monitoring" button.'),
                 backgroundColor: Theme.of(context).colorScheme.error,
+                duration: const Duration(seconds: 3),
               ),
             );
           }
         }
       }
     });
+    }
 
     // Handle warnings
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -634,11 +681,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       centerPoint = LatLng(anchor.latitude, anchor.longitude);
     }
 
+    // For secondary devices, use a default center if no data is available yet
+    // For primary devices, wait for GPS signal
+    final shouldShowLoading = centerPoint == null && !pairingState.isSecondary;
+
     return Scaffold(
       appBar: _buildAppBar(),
-      body: centerPoint == null
+      body: shouldShowLoading
           ? _buildLoadingState()
-          : _buildMapStack(anchor, position, positionHistory, displayAnchorPosition, activeAlarms, settings, isMonitoring, centerPoint, currentRadius: _isDraggingRadius ? _sliderRadiusValue : null),
+          : _buildMapStack(anchor, position, positionHistory, displayAnchorPosition, activeAlarms, settings, isMonitoring, centerPoint ?? const LatLng(0, 0), currentRadius: _isDraggingRadius ? _sliderRadiusValue : null),
     );
   }
 
@@ -823,26 +874,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   /// Builds the app bar with navigation actions.
 
-  void _setupAnchorListener() {
-    ref.listen<Anchor?>(anchorProvider, (previous, next) {
-      if (next != null && next.isActive && previous == null) {
-        try {
-          ref.read(activeAlarmsProvider.notifier).startMonitoring();
-          logger.i('Started monitoring on anchor set');
-        } catch (e, stackTrace) {
-          logger.e('Failed to start monitoring on anchor set', error: e, stackTrace: stackTrace);
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Failed to start monitoring: $e'),
-                backgroundColor: Theme.of(context).colorScheme.error,
-              ),
-            );
-          }
-        }
-      }
-    });
-  }
+  // Removed automatic anchor listener - monitoring is now explicit
 
   void _handleWarnings(List<AlarmEvent> activeWarnings, AppSettings settings) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1011,13 +1043,19 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   /// Builds the loading state when GPS is not available.
   Widget _buildLoadingState() {
-    return const Center(
+    final monitoringState = ref.watch(pairingSessionStateProvider);
+
+    return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          CircularProgressIndicator(),
-          SizedBox(height: 16),
-          Text('Waiting for GPS signal...'),
+          const CircularProgressIndicator(),
+          const SizedBox(height: 16),
+          Text(
+            monitoringState.isSecondary
+                ? 'Waiting for position data from primary device...'
+                : 'Waiting for GPS signal...',
+          ),
         ],
       ),
     );
@@ -1035,10 +1073,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     LatLng centerPoint, {
     double? currentRadius,
   }) {
+    final monitoringState = ref.watch(pairingSessionStateProvider);
     return Stack(
       children: [
         _buildMap(anchor, position, positionHistory, displayAnchorPosition, centerPoint, currentRadius: currentRadius),
-        ..._buildMapOverlays(anchor, position, activeAlarms, settings, isMonitoring),
+        ..._buildMapOverlays(anchor, position, activeAlarms, settings, isMonitoring, monitoringState),
       ],
     );
   }
@@ -1214,6 +1253,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     List<AlarmEvent> activeAlarms,
     AppSettings settings,
     bool isMonitoring,
+    PairingSessionState monitoringState,
   ) {
     return [
       // Alarm banner
@@ -1230,16 +1270,18 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         top: activeAlarms.isNotEmpty ? 80 : 16,
         left: 16,
         right: 16,
-        child: _buildInfoCard(anchor, position, settings, isMonitoring),
+        child: _buildInfoCard(anchor, position, settings, isMonitoring, monitoringState),
       ),
 
-      // Anchor controls
-      Positioned(
-        bottom: 80,
-        left: 16,
-        right: 16,
-        child: _buildAnchorControls(anchor, isMonitoring),
-      ),
+      // Anchor controls (only for primary devices)
+      if (!monitoringState.isSecondary) ...[
+        Positioned(
+          bottom: 80,
+          left: 16,
+          right: 16,
+          child: _buildAnchorControls(anchor, isMonitoring),
+        ),
+      ],
 
       // Attribution
       Positioned(

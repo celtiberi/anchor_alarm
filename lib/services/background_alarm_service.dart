@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_background_service_android/flutter_background_service_android.dart';
 import 'package:hive/hive.dart';
 import 'package:path_provider/path_provider.dart';
 import '../utils/logger_setup.dart';
@@ -79,6 +80,14 @@ void onStart(ServiceInstance service) async {
   final repository = LocalStorageRepository();
   Timer? checkTimer;
   bool isRunning = true;
+
+  // Set up foreground notification for Android
+  if (service is AndroidServiceInstance) {
+    service.setForegroundNotificationInfo(
+      title: 'Anchor Alarm Active',
+      content: 'Monitoring anchor position in background',
+    );
+  }
 
   // Initialize Hive for background service
   try {

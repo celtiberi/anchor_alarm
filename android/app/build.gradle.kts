@@ -6,13 +6,14 @@ plugins {
 }
 
 android {
-    namespace = "com.example.anchor_alarm"
+    namespace = "com.sailorsparrot.anchoralarm"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -20,8 +21,8 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.anchor_alarm"
+        // Application ID matches Firebase configuration
+        applicationId = "com.sailorsparrot.anchoralarm"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -42,3 +43,11 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // Core library desugaring for Java 8+ APIs on older Android versions
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+}
+
+// Google Services plugin for Firebase (must be applied at the end)
+apply(plugin = "com.google.gms.google-services")

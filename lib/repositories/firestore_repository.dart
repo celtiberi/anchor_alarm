@@ -3,6 +3,7 @@ import '../models/position_update.dart';
 import '../models/alarm_event.dart';
 import '../models/pairing_session.dart';
 import '../models/device_info.dart';
+import '../utils/logger_setup.dart';
 
 /// Repository for Firestore operations.
 class FirestoreRepository {
@@ -26,6 +27,20 @@ class FirestoreRepository {
       return null;
     }
     return PairingSession.fromFirestore(doc);
+  }
+
+  /// Stream of pairing session updates (for real-time device list).
+  Stream<PairingSession> getSessionStream(String token) {
+    return _firestore
+        .collection('sessions')
+        .doc(token)
+        .snapshots()
+        .map((snapshot) {
+      if (!snapshot.exists) {
+        throw StateError('Session $token not found');
+      }
+      return PairingSession.fromFirestore(snapshot);
+    });
   }
 
   /// Updates a pairing session.
@@ -72,19 +87,20 @@ class FirestoreRepository {
         .add(position.toFirestore());
   }
 
-  /// Stream of unacknowledged alarms for a session.
+  /// Stream of active alarms for a session (acknowledged alarms are deleted).
   Stream<List<AlarmEvent>> getAlarmsStream(String sessionToken) {
     return _firestore
         .collection('sessions')
         .doc(sessionToken)
         .collection('alarms')
-        .where('acknowledged', isEqualTo: false)
-        .orderBy('timestamp', descending: true)
         .snapshots()
         .map((snapshot) {
-      return snapshot.docs
+      // Sort in memory instead of requiring a Firestore index
+      final alarms = snapshot.docs
           .map((doc) => AlarmEvent.fromFirestore(doc))
           .toList();
+      alarms.sort((a, b) => b.timestamp.compareTo(a.timestamp)); // Most recent first
+      return alarms;
     });
   }
 
@@ -105,9 +121,44 @@ class FirestoreRepository {
         .doc(sessionToken)
         .collection('alarms')
         .doc(alarmId)
-        .update({
-      'acknowledged': true,
-      'acknowledgedAt': FieldValue.serverTimestamp(),
+        .delete();
+  }
+
+  /// Updates session data (anchor, boatPosition, etc.) for monitoring.
+  Future<void> updateSessionData(String sessionToken, Map<String, dynamic> data) async {
+    logger.d('🔧 Updating session $sessionToken with data: $data');
+    try {
+      await _firestore
+          .collection('sessions')
+          .doc(sessionToken)
+          .update(data);
+      logger.d('✅ Successfully updated session $sessionToken');
+    } catch (e) {
+      logger.e('❌ Failed to update session $sessionToken with data $data', error: e);
+      rethrow;
+    }
+  }
+
+  /// Gets session data for monitoring (anchor, boatPosition, alarms, positionHistory).
+  Future<Map<String, dynamic>?> getSessionData(String sessionToken) async {
+    final doc = await _firestore.collection('sessions').doc(sessionToken).get();
+    if (!doc.exists) {
+      return null;
+    }
+    return doc.data();
+  }
+
+  /// Stream of session data for monitoring (for secondary devices).
+  Stream<Map<String, dynamic>> getSessionDataStream(String sessionToken) {
+    return _firestore
+        .collection('sessions')
+        .doc(sessionToken)
+        .snapshots()
+        .map((snapshot) {
+      if (!snapshot.exists) {
+        throw StateError('Session $sessionToken not found');
+      }
+      return snapshot.data()!;
     });
   }
 
