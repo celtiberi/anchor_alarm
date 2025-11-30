@@ -1,4 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 
 /// Device role in a pairing session.
 enum DeviceRole {
@@ -7,7 +6,9 @@ enum DeviceRole {
 }
 
 /// Information about a device in a pairing session.
+/// deviceId is the Firebase Auth UID of the user/device.
 class DeviceInfo {
+  /// Firebase Auth UID of the authenticated user
   final String deviceId;
   final DeviceRole role;
   final DateTime joinedAt;
@@ -18,31 +19,46 @@ class DeviceInfo {
     required this.role,
     required this.joinedAt,
     this.lastSeenAt,
-  }) : assert(deviceId.isNotEmpty, 'Device ID cannot be empty');
+  });
 
-  /// Creates DeviceInfo from Firestore map.
-  factory DeviceInfo.fromFirestore(Map<String, dynamic> data) {
+  /// Creates DeviceInfo from RTDB map.
+  factory DeviceInfo.fromMap(Map<String, dynamic> data) {
     return DeviceInfo(
       deviceId: data['deviceId'] as String,
       role: DeviceRole.values.firstWhere(
         (e) => e.name == data['role'],
         orElse: () => DeviceRole.secondary,
       ),
-      joinedAt: (data['joinedAt'] as Timestamp).toDate(),
+      joinedAt: DateTime.fromMillisecondsSinceEpoch((data['joinedAt'] as int)),
       lastSeenAt: data['lastSeenAt'] != null
-          ? (data['lastSeenAt'] as Timestamp).toDate()
+          ? DateTime.fromMillisecondsSinceEpoch((data['lastSeenAt'] as int))
           : null,
     );
   }
 
-  /// Converts DeviceInfo to Firestore map.
-  Map<String, dynamic> toFirestore() {
+  /// Converts DeviceInfo to RTDB map.
+  Map<String, dynamic> toMap() {
     return {
       'deviceId': deviceId,
       'role': role.name,
-      'joinedAt': Timestamp.fromDate(joinedAt),
-      if (lastSeenAt != null) 'lastSeenAt': Timestamp.fromDate(lastSeenAt!),
+      'joinedAt': joinedAt.millisecondsSinceEpoch,
+      if (lastSeenAt != null) 'lastSeenAt': lastSeenAt!.millisecondsSinceEpoch,
     };
+  }
+
+  /// Creates a copy with updated fields.
+  DeviceInfo copyWith({
+    String? deviceId,
+    DeviceRole? role,
+    DateTime? joinedAt,
+    DateTime? lastSeenAt,
+  }) {
+    return DeviceInfo(
+      deviceId: deviceId ?? this.deviceId,
+      role: role ?? this.role,
+      joinedAt: joinedAt ?? this.joinedAt,
+      lastSeenAt: lastSeenAt ?? this.lastSeenAt,
+    );
   }
 
   @override

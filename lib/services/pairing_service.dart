@@ -21,17 +21,18 @@ class PairingService {
   }
 
   /// Creates a new pairing session.
-  PairingSession createSession(String deviceId) {
+  /// Note: primaryUserId will be set to the Firebase Auth UID by the repository
+  PairingSession createSession() {
     final token = generateSessionToken();
     final now = DateTime.now();
     final expiresAt = now.add(const Duration(hours: 24));
 
     final session = PairingSession(
       token: token,
-      primaryDeviceId: deviceId,
+      primaryUserId: '', // Will be overridden by repository with auth UID
       devices: [
         DeviceInfo(
-          deviceId: deviceId,
+          deviceId: '', // Will be overridden by repository with auth UID
           role: DeviceRole.primary,
           joinedAt: now,
         ),

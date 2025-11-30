@@ -1,10 +1,10 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'device_info.dart';
 
 /// Manages multi-device pairing for remote monitoring.
 class PairingSession {
   final String token;
-  final String primaryDeviceId;
+  /// Firebase Auth UID of the session owner (primary user)
+  final String primaryUserId;
   final List<DeviceInfo> devices;
   final DateTime createdAt;
   final DateTime expiresAt;
@@ -12,7 +12,7 @@ class PairingSession {
 
   PairingSession({
     required this.token,
-    required this.primaryDeviceId,
+    required this.primaryUserId,
     required this.devices,
     required this.createdAt,
     required this.expiresAt,
@@ -20,10 +20,6 @@ class PairingSession {
   }) : assert(
           token.isNotEmpty,
           'Session token cannot be empty',
-        ),
-        assert(
-          primaryDeviceId.isNotEmpty,
-          'Primary device ID cannot be empty',
         ),
         assert(
           devices.isNotEmpty,
@@ -34,33 +30,41 @@ class PairingSession {
           'Expiry time must be after creation time',
         ),
         assert(
-          devices.any((d) => d.deviceId == primaryDeviceId && d.role == DeviceRole.primary),
+          devices.any((d) => d.deviceId == primaryUserId && d.role == DeviceRole.primary),
           'Primary device must exist in devices list with primary role',
         );
 
-  /// Creates PairingSession from Firestore document.
-  factory PairingSession.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+  /// Creates PairingSession from RTDB map.
+  factory PairingSession.fromMap(Map<String, dynamic> data, String token) {
+    // Handle the devices map which comes as Map<Object?, Object?> from Firebase
+    final rawDevices = data['devices'] as Map<Object?, Object?>;
+    final devicesMap = rawDevices.map((key, value) => MapEntry(key.toString(), value));
+
     return PairingSession(
-      token: doc.id,
-      primaryDeviceId: data['primaryDeviceId'] as String,
-      devices: (data['devices'] as List<dynamic>)
-          .map((d) => DeviceInfo.fromFirestore(d as Map<String, dynamic>))
+      token: token,
+      primaryUserId: data['primaryUserId'] as String,
+      devices: devicesMap.values
+          .map((d) {
+            final rawDevice = d as Map<Object?, Object?>;
+            final deviceData = rawDevice.map((key, value) => MapEntry(key.toString(), value));
+            return DeviceInfo.fromMap(deviceData);
+          })
           .toList(),
-      createdAt: (data['createdAt'] as Timestamp).toDate(),
-      expiresAt: (data['expiresAt'] as Timestamp).toDate(),
+      createdAt: DateTime.fromMillisecondsSinceEpoch((data['createdAt'] as int)),
+      expiresAt: DateTime.fromMillisecondsSinceEpoch((data['expiresAt'] as int)),
       isActive: data['isActive'] as bool? ?? true,
     );
   }
 
-  /// Converts PairingSession to Firestore document data.
-  Map<String, dynamic> toFirestore() {
+  /// Converts PairingSession to RTDB map data.
+  Map<String, dynamic> toMap() {
     return {
-      'token': token,
-      'primaryDeviceId': primaryDeviceId,
-      'devices': devices.map((d) => d.toFirestore()).toList(),
-      'createdAt': Timestamp.fromDate(createdAt),
-      'expiresAt': Timestamp.fromDate(expiresAt),
+      'primaryUserId': primaryUserId,
+      'devices': {
+        for (final device in devices) device.deviceId: device.toMap()
+      },
+      'createdAt': createdAt.millisecondsSinceEpoch,
+      'expiresAt': expiresAt.millisecondsSinceEpoch,
       'isActive': isActive,
     };
   }
@@ -71,7 +75,7 @@ class PairingSession {
   /// Creates a copy with updated fields.
   PairingSession copyWith({
     String? token,
-    String? primaryDeviceId,
+    String? primaryUserId,
     List<DeviceInfo>? devices,
     DateTime? createdAt,
     DateTime? expiresAt,
@@ -79,7 +83,7 @@ class PairingSession {
   }) {
     return PairingSession(
       token: token ?? this.token,
-      primaryDeviceId: primaryDeviceId ?? this.primaryDeviceId,
+      primaryUserId: primaryUserId ?? this.primaryUserId,
       devices: devices ?? this.devices,
       createdAt: createdAt ?? this.createdAt,
       expiresAt: expiresAt ?? this.expiresAt,
@@ -98,7 +102,7 @@ class PairingSession {
       updatedDevices[existingDeviceIndex] = device;
       return PairingSession(
         token: token,
-        primaryDeviceId: primaryDeviceId,
+        primaryUserId: primaryUserId,
         devices: updatedDevices,
         createdAt: createdAt,
         expiresAt: expiresAt,
@@ -109,7 +113,7 @@ class PairingSession {
     // New device - add it
     return PairingSession(
       token: token,
-      primaryDeviceId: primaryDeviceId,
+      primaryUserId: primaryUserId,
       devices: [...devices, device],
       createdAt: createdAt,
       expiresAt: expiresAt,
@@ -122,7 +126,7 @@ class PairingSession {
     if (identical(this, other)) return true;
     return other is PairingSession &&
         other.token == token &&
-        other.primaryDeviceId == primaryDeviceId &&
+        other.primaryUserId == primaryUserId &&
         other.devices.length == devices.length &&
         other.createdAt == createdAt &&
         other.expiresAt == expiresAt &&
@@ -133,7 +137,7 @@ class PairingSession {
   int get hashCode {
     return Object.hash(
       token,
-      primaryDeviceId,
+      primaryUserId,
       devices.length,
       createdAt,
       expiresAt,
@@ -143,7 +147,7 @@ class PairingSession {
 
   @override
   String toString() {
-    return 'PairingSession(token: $token, primaryDevice: $primaryDeviceId, devices: ${devices.length}, active: $isActive, expiresAt: $expiresAt)';
+    return 'PairingSession(token: $token, primaryUser: $primaryUserId, devices: ${devices.length}, active: $isActive, expiresAt: $expiresAt)';
   }
 }
 

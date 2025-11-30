@@ -1,4 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 
 /// Type of alarm event.
 enum AlarmType {
@@ -52,11 +51,26 @@ class AlarmEvent {
           'Distance from anchor must be non-negative, got $distanceFromAnchor',
         );
 
-  /// Creates AlarmEvent from Firestore document.
-  factory AlarmEvent.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+  /// Creates AlarmEvent from RTDB map.
+  /// Helper method to parse doubles that might be stored as different types in RTDB
+  static double _parseDouble(dynamic value) {
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    if (value is String) return double.tryParse(value) ?? 0.0;
+    return 0.0; // fallback
+  }
+
+  /// Helper method to parse timestamps that might be stored as different types in RTDB
+  static int _parseTimestamp(dynamic value) {
+    if (value is int) return value;
+    if (value is double) return value.toInt();
+    if (value is String) return int.tryParse(value) ?? 0;
+    return 0; // fallback
+  }
+
+  factory AlarmEvent.fromMap(Map<String, dynamic> data, String alarmId) {
     return AlarmEvent(
-      id: doc.id,
+      id: alarmId,
       type: AlarmType.values.firstWhere(
         (e) => e.name == data['type'],
         orElse: () => AlarmType.driftExceeded,
@@ -65,30 +79,29 @@ class AlarmEvent {
         (e) => e.name == (data['severity'] as String? ?? 'alarm'),
         orElse: () => Severity.alarm,
       ),
-      timestamp: (data['timestamp'] as Timestamp).toDate(),
-      latitude: data['latitude'] as double,
-      longitude: data['longitude'] as double,
-      distanceFromAnchor: data['distanceFromAnchor'] as double,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(_parseTimestamp(data['timestamp'])),
+      latitude: _parseDouble(data['latitude']),
+      longitude: _parseDouble(data['longitude']),
+      distanceFromAnchor: _parseDouble(data['distanceFromAnchor']),
       acknowledged: data['acknowledged'] as bool? ?? false,
       acknowledgedAt: data['acknowledgedAt'] != null
-          ? (data['acknowledgedAt'] as Timestamp).toDate()
+          ? DateTime.fromMillisecondsSinceEpoch((data['acknowledgedAt'] as int))
           : null,
     );
   }
 
-  /// Converts AlarmEvent to Firestore document data.
-  Map<String, dynamic> toFirestore() {
+  /// Converts AlarmEvent to RTDB map data.
+  Map<String, dynamic> toMap() {
     return {
-      'id': id,
       'type': type.name,
       'severity': severity.name,
-      'timestamp': Timestamp.fromDate(timestamp),
+      'timestamp': timestamp.millisecondsSinceEpoch,
       'latitude': latitude,
       'longitude': longitude,
       'distanceFromAnchor': distanceFromAnchor,
       'acknowledged': acknowledged,
       if (acknowledgedAt != null)
-        'acknowledgedAt': Timestamp.fromDate(acknowledgedAt!),
+        'acknowledgedAt': acknowledgedAt!.millisecondsSinceEpoch,
     };
   }
 

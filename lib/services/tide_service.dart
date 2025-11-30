@@ -91,7 +91,7 @@ class TideService {
       return cached.getCurrentTideHeight();
     }
     
-    if (_apiKey == null || _apiKey.isEmpty) {
+    if (_apiKey == null || _apiKey!.isEmpty) {
       logger.w('WorldTides API key not set. Tide data unavailable.');
       return null;
     }
@@ -190,7 +190,7 @@ class TideService {
       return cached.getMinTideHeight(hours);
     }
     
-    if (_apiKey == null || _apiKey.isEmpty) {
+    if (_apiKey == null || _apiKey!.isEmpty) {
       logger.w('WorldTides API key not set. Tide data unavailable.');
       return null;
     }

@@ -2,12 +2,14 @@ import 'dart:convert';
 import 'package:hive/hive.dart';
 import '../models/anchor.dart';
 import '../models/app_settings.dart';
+import '../models/alarm_event.dart';
 
 /// Repository for local storage using Hive.
 class LocalStorageRepository {
   static const String _settingsBoxName = 'settings';
   static const String _anchorBoxName = 'anchor'; // Reserved for future use
   static const String _sessionBoxName = 'monitoring_session';
+  static const String _backgroundAlarmsBoxName = 'background_alarms';
 
   /// Initializes Hive boxes.
   Future<void> initialize() async {
@@ -29,6 +31,11 @@ class LocalStorageRepository {
     // Open monitoring session box
     if (!Hive.isBoxOpen(_sessionBoxName)) {
       await Hive.openBox(_sessionBoxName);
+    }
+
+    // Open background alarms box
+    if (!Hive.isBoxOpen(_backgroundAlarmsBoxName)) {
+      await Hive.openBox(_backgroundAlarmsBoxName);
     }
   }
 
@@ -138,6 +145,42 @@ class LocalStorageRepository {
   String? getDeviceRole() {
     final box = Hive.box(_sessionBoxName);
     return box.get('deviceRole') as String?;
+  }
+
+  /// Saves a background alarm event to local storage.
+  Future<void> saveBackgroundAlarmEvent(AlarmEvent alarm) async {
+    final box = Hive.box(_backgroundAlarmsBoxName);
+    final json = jsonEncode(alarm.toMap());
+    // Use timestamp as key for uniqueness
+    await box.put(alarm.timestamp.millisecondsSinceEpoch.toString(), json);
+  }
+
+  /// Gets all background alarm events from local storage.
+  List<AlarmEvent> getBackgroundAlarmEvents() {
+    final box = Hive.box(_backgroundAlarmsBoxName);
+    final events = <AlarmEvent>[];
+
+    for (final key in box.keys) {
+      final jsonString = box.get(key) as String?;
+      if (jsonString != null) {
+        try {
+          final json = jsonDecode(jsonString) as Map<String, dynamic>;
+          // fromMap requires an alarmId parameter, so we use the key
+          events.add(AlarmEvent.fromMap(json, key));
+        } catch (e) {
+          // Skip invalid entries
+          continue;
+        }
+      }
+    }
+
+    return events;
+  }
+
+  /// Clears all background alarm events from local storage.
+  Future<void> clearBackgroundAlarmEvents() async {
+    final box = Hive.box(_backgroundAlarmsBoxName);
+    await box.clear();
   }
 }
 

@@ -1,4 +1,4 @@
-buildscript {
+buildscript {    
     repositories {
         google()
         mavenCentral()
@@ -7,12 +7,24 @@ buildscript {
         // Google Services plugin for Firebase
         classpath("com.google.gms:google-services:4.4.2")
     }
+
 }
 
 allprojects {
+    ext {
+        set("appCompatVersion", "1.7.1")
+        set("playServicesLocationVersion", "21.3.0")
+    }
     repositories {
         google()
         mavenCentral()
+        maven { url = uri("https://jitpack.io") }
+        maven {
+            url = uri(project(":flutter_background_geolocation").projectDir.resolve("libs"))
+        }
+        maven {
+            url = uri(project(":background_fetch").projectDir.resolve("libs"))
+        }
     }
 }
 

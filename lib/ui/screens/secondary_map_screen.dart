@@ -1,13 +1,13 @@
-import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import '../../providers/settings_provider.dart';
-import '../../providers/pairing_session_provider.dart';
-import '../../providers/effective_providers.dart';
-import '../../providers/remote_position_history_provider.dart';
+import '../../providers/pairing_providers.dart';
+import '../../providers/remote_data_providers.dart';
+import '../../providers/local_alarm_dismissal_provider.dart';
+import '../../providers/service_providers.dart';
 import '../../models/anchor.dart';
 import '../../models/position_update.dart';
 import '../../models/alarm_event.dart';
@@ -33,53 +33,122 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
   List<LatLng>? _cachedPolygonPoints;
   LatLng? _cachedPolygonCenter;
   double? _cachedPolygonRadius;
-  final Set<String> _shownWarningIds = {}; // Track which warnings have been shown
+  final Set<String> _shownWarningIds =
+      {}; // Track which warnings have been shown
   bool _isInfoCardExpanded = true; // Track if info card is expanded
+  LatLng? _lastCenterPoint; // Track last center point to detect changes
+  DateTime? _roleChangeTime; // Track when role changed to force loading state
+  bool _mapRendered = false; // Track if FlutterMap has been rendered
 
   @override
   Widget build(BuildContext context) {
+    // Track role changes to force loading state during transitions
+    ref.listen<PairingSessionState>(pairingSessionStateProvider, (
+      previous,
+      next,
+    ) {
+      if (previous?.role != next.role) {
+        _roleChangeTime = DateTime.now();
+      }
+    });
 
     // Listen to anchor changes and update map center
-    ref.listen<Anchor?>(currentAnchorProvider, (previous, next) {
-      if (next != null && mounted) {
-        final centerPoint = LatLng(next.latitude, next.longitude);
+    ref.listen<AsyncValue<Anchor?>>(remoteAnchorProvider, (previous, next) {
+      final anchor = next.value;
+      final prevAnchor = previous?.value;
+      if (anchor != null && mounted && _mapRendered) {
+        final centerPoint = LatLng(anchor.latitude, anchor.longitude);
 
         // Only update zoom if anchor position changed (not just radius)
         double zoomLevel = _mapController.camera.zoom; // Keep current zoom
-        if (previous == null ||
-            previous.latitude != next.latitude ||
-            previous.longitude != next.longitude) {
+        if (prevAnchor == null ||
+            prevAnchor.latitude != anchor.latitude ||
+            prevAnchor.longitude != anchor.longitude) {
           // Anchor position changed - recalculate zoom for new position
-          zoomLevel = calculateZoomForRadius(next.radius);
-          logger.d('Secondary map centered on anchor: ${next.latitude}, ${next.longitude}');
+          zoomLevel = calculateZoomForRadius(anchor.radius);
+          logger.d(
+            'Secondary map centered on anchor: ${anchor.latitude}, ${anchor.longitude}',
+          );
         } else {
           // Only radius changed - keep current zoom level
-          logger.d('Secondary map radius changed to ${next.radius}m, keeping current zoom');
+          logger.d(
+            'Secondary map radius changed to ${anchor.radius}m, keeping current zoom',
+          );
         }
 
         _mapController.move(centerPoint, zoomLevel);
       }
     });
 
-    final pairingState = ref.watch(pairingSessionStateProvider);
-    final anchorAsync = ref.watch(effectiveAnchorProvider);
-    final positionAsync = ref.watch(effectivePositionProvider);
-    final positionHistoryAsync = ref.watch(remotePositionHistoryProvider);
-    final alarmsAsync = ref.watch(effectiveAlarmProvider);
+    // Listen to position changes and center map if no anchor is set
+    ref.listen<AsyncValue<PositionUpdate?>>(remotePositionProvider, (
+      previous,
+      next,
+    ) {
+      final position = next.value;
+      if (position != null && mounted && _mapRendered) {
+        final currentAnchor = ref.read(remoteAnchorProvider).value;
+        // Only center on position if there's no anchor set
+        if (currentAnchor == null) {
+          final centerPoint = LatLng(position.latitude, position.longitude);
+          const zoomLevel = 18.0; // Default zoom for position-only centering
+          _mapController.move(centerPoint, zoomLevel);
+          logger.d(
+            'Secondary map centered on boat position (no anchor): ${position.latitude}, ${position.longitude}',
+          );
+        }
+      }
+    });
+
+    final anchorAsync = ref.watch(remoteAnchorProvider);
+    final positionAsync = ref.watch(remotePositionProvider);
+    final positionHistory = ref.watch(secondaryPositionHistoryProvider);
+    final alarmsAsync = ref.watch(remoteAlarmProvider);
     final settings = ref.watch(settingsProvider);
 
     // Extract values from async results
     final anchor = anchorAsync.value;
     final position = positionAsync.value;
-    final positionHistory = positionHistoryAsync.value ?? [];
     final alarms = alarmsAsync.value ?? [];
 
     // Determine monitoring status
-    final monitoringAsync = ref.watch(effectiveMonitoringStatusProvider);
+    final monitoringAsync = ref.watch(remoteMonitoringStatusProvider);
     final isMonitoring = monitoringAsync.value ?? false;
 
-    final activeAlarms = alarms.where((a) => a.severity == Severity.alarm).toList();
-    final activeWarnings = alarms.where((a) => a.severity == Severity.warning).toList();
+    final activeAlarms = alarms
+        .where((a) => a.severity == Severity.alarm)
+        .toList();
+    final activeWarnings = alarms
+        .where((a) => a.severity == Severity.warning)
+        .toList();
+
+    // Show loading state for first 2 seconds after role change to allow async operations to complete
+    final timeSinceRoleChange = DateTime.now().difference(
+      _roleChangeTime ?? DateTime.now(),
+    );
+    final forceLoading =
+        _roleChangeTime != null &&
+        timeSinceRoleChange < const Duration(seconds: 2);
+
+    // Allow map to show if we have some data and loading period is over
+    final hasData = anchor != null || position != null;
+    final canShowMap = !forceLoading && hasData;
+
+    if (!canShowMap) {
+      return Scaffold(
+        appBar: _buildAppBar(),
+        body: const Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Loading data from primary device...'),
+            ],
+          ),
+        ),
+      );
+    }
 
     // Handle warnings
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -90,12 +159,14 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
             _showWarningSnackBar(warning, settings);
           }
         }
-        _shownWarningIds.removeWhere((id) => !activeWarnings.any((w) => w.id == id));
+        _shownWarningIds.removeWhere(
+          (id) => !activeWarnings.any((w) => w.id == id),
+        );
       }
     });
 
     // Calculate map center - always center on anchor if available
-    LatLng? centerPoint;
+    LatLng centerPoint;
     if (anchor != null) {
       centerPoint = LatLng(anchor.latitude, anchor.longitude);
     } else if (position != null) {
@@ -105,13 +176,37 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
       centerPoint = const LatLng(0, 0);
     }
 
-    final shouldShowLoading = centerPoint == null;
+    // Move map if center point changed and map is ready
+    if (_lastCenterPoint != null &&
+        _lastCenterPoint != centerPoint &&
+        mounted &&
+        _mapRendered) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _mapRendered) {
+          double zoomLevel = 18.0;
+          if (anchor != null) {
+            zoomLevel = calculateZoomForRadius(anchor.radius);
+          }
+          _mapController.move(centerPoint, zoomLevel);
+          logger.d(
+            'Secondary map recentered to: ${centerPoint.latitude}, ${centerPoint.longitude}',
+          );
+        }
+      });
+    }
+    _lastCenterPoint = centerPoint;
 
     return Scaffold(
       appBar: _buildAppBar(),
-      body: shouldShowLoading
-          ? _buildLoadingState()
-          : _buildMapStack(anchor, position, positionHistory, activeAlarms, settings, isMonitoring, centerPoint),
+      body: _buildMapStack(
+        anchor,
+        position,
+        positionHistory,
+        activeAlarms,
+        settings,
+        isMonitoring,
+        centerPoint,
+      ),
     );
   }
 
@@ -132,24 +227,15 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
     );
   }
 
-  Widget _buildLoadingState() {
-    return Container(
-      color: Theme.of(context).colorScheme.surface,
-      child: const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            CircularProgressIndicator(),
-            SizedBox(height: 16),
-            Text('Waiting for position data from primary device...'),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMapStack(Anchor? anchor, PositionUpdate? position, List<PositionHistoryPoint> positionHistory,
-      List<AlarmEvent> activeAlarms, AppSettings settings, bool isMonitoring, LatLng centerPoint) {
+  Widget _buildMapStack(
+    Anchor? anchor,
+    PositionUpdate? position,
+    List<PositionHistoryPoint> positionHistory,
+    List<AlarmEvent> activeAlarms,
+    AppSettings settings,
+    bool isMonitoring,
+    LatLng centerPoint,
+  ) {
     // Calculate zoom level
     double zoomLevel = 18.0;
     if (anchor != null) {
@@ -161,13 +247,14 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
         FlutterMap(
           key: _mapKey,
           mapController: _mapController,
-          options:           MapOptions(
+          options: MapOptions(
             initialCenter: centerPoint,
             initialZoom: zoomLevel,
             maxZoom: 19.0,
             minZoom: 5.0,
             onMapReady: () {
               // Initial map setup
+              _mapRendered = true;
               _mapController.move(centerPoint, zoomLevel);
             },
           ),
@@ -182,7 +269,7 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
                 polylines: [
                   Polyline(
                     points: positionHistory.map((p) => p.position).toList(),
-                    color: Colors.blue.withOpacity(0.6),
+                    color: Colors.blue.withValues(alpha: 0.6),
                     strokeWidth: 3.0,
                   ),
                 ],
@@ -192,17 +279,26 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
               PolygonLayer(
                 polygons: [
                   Polygon(
-                    points: _getAnchorRadiusPolygonPoints(LatLng(anchor.latitude, anchor.longitude), anchor.radius),
-                    color: getAnchorCircleColor(anchor, position, context).withOpacity(0.2),
-                    borderColor: getAnchorCircleColor(anchor, position, context),
+                    points: _getAnchorRadiusPolygonPoints(
+                      LatLng(anchor.latitude, anchor.longitude),
+                      anchor.radius,
+                    ),
+                    color: getAnchorCircleColor(
+                      anchor,
+                      position,
+                      context,
+                    ).withValues(alpha: 0.2),
+                    borderColor: getAnchorCircleColor(
+                      anchor,
+                      position,
+                      context,
+                    ),
                     borderStrokeWidth: 2.0,
                   ),
                 ],
               ),
             // Markers
-            MarkerLayer(
-              markers: _buildMarkers(anchor, position),
-            ),
+            MarkerLayer(markers: _buildMarkers(anchor, position)),
           ],
         ),
         // Alarm banner - show for awareness but without dismiss button
@@ -236,11 +332,7 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
           children: [
             Row(
               children: [
-                Icon(
-                  Icons.warning,
-                  color: theme.colorScheme.onError,
-                  size: 24,
-                ),
+                Icon(Icons.warning, color: theme.colorScheme.onError, size: 24),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -252,23 +344,63 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
                     ),
                   ),
                 ),
+                TextButton.icon(
+                  onPressed: () {
+                    // Dismiss alarm locally on secondary device
+                    ref
+                        .read(localAlarmDismissalProvider.notifier)
+                        .dismissLocally(alarm.id);
+                    // Stop notification sounds/vibration
+                    ref.read(notificationServiceProvider).stopAlarm();
+                  },
+                  icon: Icon(
+                    Icons.close,
+                    color: theme.colorScheme.onError,
+                    size: 20,
+                  ),
+                  label: Text(
+                    'DISMISS',
+                    style: TextStyle(
+                      color: theme.colorScheme.onError,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                    ),
+                  ),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 4),
             if (alarm.type == AlarmType.driftExceeded)
               Text(
                 'Drifted ${formatDistance(alarm.distanceFromAnchor, settings.unitSystem)} from anchor',
-                style: TextStyle(color: theme.colorScheme.onError, fontSize: 12),
+                style: TextStyle(
+                  color: theme.colorScheme.onError,
+                  fontSize: 12,
+                ),
               )
             else if (alarm.type == AlarmType.gpsLost)
               Text(
                 'GPS signal lost',
-                style: TextStyle(color: theme.colorScheme.onError, fontSize: 12),
+                style: TextStyle(
+                  color: theme.colorScheme.onError,
+                  fontSize: 12,
+                ),
               )
             else if (alarm.type == AlarmType.gpsInaccurate)
               Text(
                 'GPS accuracy poor',
-                style: TextStyle(color: theme.colorScheme.onError, fontSize: 12),
+                style: TextStyle(
+                  color: theme.colorScheme.onError,
+                  fontSize: 12,
+                ),
               ),
           ],
         ),
@@ -276,7 +408,12 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
     );
   }
 
-  Widget _buildInfoCard(Anchor? anchor, PositionUpdate? position, AppSettings settings, bool isMonitoring) {
+  Widget _buildInfoCard(
+    Anchor? anchor,
+    PositionUpdate? position,
+    AppSettings settings,
+    bool isMonitoring,
+  ) {
     return Card(
       elevation: 4,
       child: InkWell(
@@ -324,10 +461,7 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
                 if (anchor != null) ...[
                   Text(
                     'Anchor Set',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                   ),
                   const SizedBox(height: 4),
                   Text(
@@ -362,15 +496,7 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
                       ),
                     ),
                     Text(
-                      'Distance from anchor: ${formatDistance(
-                        calculateDistance(
-                          anchor.latitude,
-                          anchor.longitude,
-                          position.latitude,
-                          position.longitude,
-                        ),
-                        settings.unitSystem,
-                      )}',
+                      'Distance from anchor: ${formatDistance(calculateDistance(anchor.latitude, anchor.longitude, position.latitude, position.longitude), settings.unitSystem)}',
                       style: TextStyle(
                         fontSize: 12,
                         color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -380,10 +506,7 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
                 ] else if (position != null) ...[
                   Text(
                     'GPS Position Available',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                   ),
                   const SizedBox(height: 4),
                   Text(
@@ -418,11 +541,7 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
       markers.add(
         Marker(
           point: LatLng(position.latitude, position.longitude),
-          child: const Icon(
-            Icons.my_location,
-            color: Colors.blue,
-            size: 30,
-          ),
+          child: const Icon(Icons.my_location, color: Colors.blue, size: 30),
         ),
       );
     }
@@ -432,11 +551,7 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
       markers.add(
         Marker(
           point: LatLng(anchor.latitude, anchor.longitude),
-          child: const Icon(
-            Icons.anchor,
-            color: Colors.red,
-            size: 30,
-          ),
+          child: const Icon(Icons.anchor, color: Colors.red, size: 30),
         ),
       );
     }
@@ -444,7 +559,10 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
     return markers;
   }
 
-  List<LatLng> _getAnchorRadiusPolygonPoints(LatLng center, double radiusMeters) {
+  List<LatLng> _getAnchorRadiusPolygonPoints(
+    LatLng center,
+    double radiusMeters,
+  ) {
     // Cache polygon points for performance
     if (_cachedPolygonPoints != null &&
         _cachedPolygonCenter == center &&
@@ -461,7 +579,11 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
     for (int i = 0; i <= segments; i++) {
       final angle = (i * 2 * math.pi) / segments;
       final lat = center.latitude + radiusDegrees * math.sin(angle);
-      final lng = center.longitude + radiusDegrees * math.cos(angle) / math.cos(center.latitude * math.pi / 180);
+      final lng =
+          center.longitude +
+          radiusDegrees *
+              math.cos(angle) /
+              math.cos(center.latitude * math.pi / 180);
       points.add(LatLng(lat, lng));
     }
 
@@ -501,9 +623,7 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
               size: 20,
             ),
             const SizedBox(width: 8),
-            Expanded(
-              child: Text(message),
-            ),
+            Expanded(child: Text(message)),
           ],
         ),
         backgroundColor: Colors.orange,

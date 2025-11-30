@@ -56,6 +56,12 @@
 	<array>
 		<string>location</string>
 	</array>
+	<!-- Camera permissions for QR code scanning -->
+	<key>NSCameraUsageDescription</key>
+	<string>Anchor Alarm needs camera access to scan QR codes for device pairing.</string>
+	<!-- Local network permissions for GPS accuracy -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Anchor Alarm uses local network access to improve GPS accuracy by scanning nearby Wi-Fi networks for better location positioning.</string>
 	<!-- Deep linking for monitoring session join -->
 	<key>CFBundleURLTypes</key>
 	<array>

@@ -1,12 +1,12 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/anchor.dart';
 import '../repositories/local_storage_repository.dart';
-import 'local_storage_provider.dart';
+import 'service_providers.dart';
 import 'alarm_provider.dart';
 import '../utils/logger_setup.dart';
 
 /// Provides the current anchor state.
-final anchorProvider = NotifierProvider<AnchorNotifier, Anchor?>(() {
+final anchorProvider = NotifierProvider.autoDispose<AnchorNotifier, Anchor?>(() {
   return AnchorNotifier();
 });
 
@@ -16,8 +16,10 @@ class AnchorNotifier extends Notifier<Anchor?> {
 
   @override
   Anchor? build() {
-    // Start fresh - no anchor persistence
-    return null;
+    // Load anchor from local storage if it exists
+    final savedAnchor = _repository.getAnchor();
+    logger.i('⚓ Anchor provider build() called - loaded anchor: $savedAnchor');
+    return savedAnchor;
   }
 
   /// Sets a new anchor point.
@@ -26,16 +28,20 @@ class AnchorNotifier extends Notifier<Anchor?> {
     required double longitude,
     required double radius,
   }) async {
+    final now = DateTime.now();
     final anchor = Anchor(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      id: now.millisecondsSinceEpoch.toString(),
       latitude: latitude,
       longitude: longitude,
       radius: radius,
-      createdAt: DateTime.now(),
+      createdAt: now,
       isActive: true,
     );
 
+    logger.i('⚓ Setting new anchor: lat=$latitude, lon=$longitude, radius=$radius');
+    await _repository.saveAnchor(anchor);
     state = anchor;
+    logger.i('✅ Anchor set successfully in local state and saved to storage');
   }
 
   /// Updates anchor position (for drag adjustment).
@@ -53,6 +59,7 @@ class AnchorNotifier extends Notifier<Anchor?> {
       updatedAt: DateTime.now(),
     );
 
+    await _repository.saveAnchor(updatedAnchor);
     state = updatedAnchor;
   }
 

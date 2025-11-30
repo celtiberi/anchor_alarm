@@ -1,10 +1,10 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/app_settings.dart';
 import '../repositories/local_storage_repository.dart';
-import 'local_storage_provider.dart';
+import 'service_providers.dart';
 
 /// Provides app settings state.
-final settingsProvider = NotifierProvider<SettingsNotifier, AppSettings>(() {
+final settingsProvider = NotifierProvider.autoDispose<SettingsNotifier, AppSettings>(() {
   return SettingsNotifier();
 });
 
@@ -57,6 +57,18 @@ class SettingsNotifier extends Notifier<AppSettings> {
   /// Toggles vibration enabled.
   Future<void> toggleVibration() async {
     final updated = state.copyWith(vibrationEnabled: !state.vibrationEnabled);
+    await updateSettings(updated);
+  }
+
+  /// Updates position update interval.
+  Future<void> setPositionUpdateInterval(int interval) async {
+    final updated = state.copyWith(positionUpdateInterval: interval);
+    await updateSettings(updated);
+  }
+
+  /// Updates position history batch interval.
+  Future<void> setPositionHistoryBatchInterval(int interval) async {
+    final updated = state.copyWith(positionHistoryBatchInterval: interval);
     await updateSettings(updated);
   }
 }

@@ -1,0 +1,33 @@
+{
+  "rules": {
+    "sessions": {
+      "$token": {
+        ".read": true,
+        ".write": "auth != null && (data.child('primaryUserId').val() === auth.uid || newData.child('primaryUserId').val() === auth.uid)",
+        "devices": {
+          "$userId": { 
+            ".write": "auth.uid === $userId || root.child('sessions/' + $token + '/primaryUserId').val() === auth.uid"
+          }
+        },
+        "alarms": {
+          "$alarmId": {
+            ".write": "auth != null && root.child('sessions').child($token).child('primaryUserId').val() === auth.uid"
+          }
+        },
+        "latestPosition": {
+          ".write": "auth != null && root.child('sessions').child($token).child('primaryUserId').val() === auth.uid"
+        },
+        "$other": {
+          ".write": "auth != null && root.child('sessions').child($token).child('primaryUserId').val() === auth.uid"
+        },
+        ".validate": "newData.hasChildren(['primaryUserId', 'expiresAt']) && newData.child('primaryUserId').isString() && newData.child('expiresAt').isNumber() && newData.child('devices').exists()"
+      }
+    },
+    "deviceSessions": {
+      "$userId": {
+        ".read": "auth != null && auth.uid === $userId",
+        ".write": "auth != null && auth.uid === $userId"
+      }
+    }
+  }
+}

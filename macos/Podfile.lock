@@ -1188,6 +1188,8 @@ PODS:
     - abseil/meta/type_traits
     - abseil/xcprivacy
   - abseil/xcprivacy (1.20240722.0)
+  - app_links (6.4.1):
+    - FlutterMacOS
   - BoringSSL-GRPC (0.0.37):
     - BoringSSL-GRPC/Implementation (= 0.0.37)
     - BoringSSL-GRPC/Interface (= 0.0.37)
@@ -1198,6 +1200,8 @@ PODS:
     - Firebase/CoreOnly (~> 12.4.0)
     - Firebase/Firestore (~> 12.4.0)
     - firebase_core
+    - FlutterMacOS
+  - device_info_plus (0.0.1):
     - FlutterMacOS
   - Firebase/Auth (12.4.0):
     - Firebase/CoreOnly
@@ -1420,7 +1424,9 @@ PODS:
   - PromisesObjC (2.4.0)
 
 DEPENDENCIES:
+  - app_links (from `Flutter/ephemeral/.symlinks/plugins/app_links/macos`)
   - cloud_firestore (from `Flutter/ephemeral/.symlinks/plugins/cloud_firestore/macos`)
+  - device_info_plus (from `Flutter/ephemeral/.symlinks/plugins/device_info_plus/macos`)
   - firebase_auth (from `Flutter/ephemeral/.symlinks/plugins/firebase_auth/macos`)
   - firebase_core (from `Flutter/ephemeral/.symlinks/plugins/firebase_core/macos`)
   - firebase_messaging (from `Flutter/ephemeral/.symlinks/plugins/firebase_messaging/macos`)
@@ -1457,8 +1463,12 @@ SPEC REPOS:
     - PromisesObjC
 
 EXTERNAL SOURCES:
+  app_links:
+    :path: Flutter/ephemeral/.symlinks/plugins/app_links/macos
   cloud_firestore:
     :path: Flutter/ephemeral/.symlinks/plugins/cloud_firestore/macos
+  device_info_plus:
+    :path: Flutter/ephemeral/.symlinks/plugins/device_info_plus/macos
   firebase_auth:
     :path: Flutter/ephemeral/.symlinks/plugins/firebase_auth/macos
   firebase_core:
@@ -1480,8 +1490,10 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   abseil: a05cc83bf02079535e17169a73c5be5ba47f714b
+  app_links: 05a6ec2341985eb05e9f97dc63f5837c39895c3f
   BoringSSL-GRPC: dded2a44897e45f28f08ae87a55ee4bcd19bc508
   cloud_firestore: 70eeb80d0c7613ac5e0e72f7de9a2fead7a2e15a
+  device_info_plus: a56e6e74dbbd2bb92f2da12c64ddd4f67a749041
   Firebase: f07b15ae5a6ec0f93713e30b923d9970d144af3e
   firebase_auth: 87ea88759d0282ccf1e2afe96f88ff3c07547938
   firebase_core: e054894ab56033ef9bcbe2d9eac9395e5306e2fc

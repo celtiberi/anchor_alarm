@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import '../../providers/pairing_provider.dart';
-import '../../providers/pairing_session_provider.dart';
+import '../../providers/pairing_providers.dart';
 import '../../utils/logger_setup.dart';
 
 /// Screen for scanning QR code to join a pairing session.
@@ -13,11 +12,19 @@ class PairingScanScreen extends ConsumerStatefulWidget {
   ConsumerState<PairingScanScreen> createState() => _PairingScanScreenState();
 }
 
-class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
-  final MobileScannerController _controller = MobileScannerController();
+class _PairingScanScreenState extends ConsumerState<PairingScanScreen>
+    with WidgetsBindingObserver {
+  final MobileScannerController _controller = MobileScannerController(
+    autoStart: false, // Don't start automatically to avoid blocking UI
+  );
   bool _isJoining = false;
   String? _scannedToken;
   DateTime? _lastScanTime;
+  bool _scannerStarted = false;
+  bool _showConflictDialog = false; // Control dialog visibility
+  bool _conflictDialogDismissed =
+      false; // Prevent dialog from showing again once dismissed
+  // Camera permission handling is now done by MobileScanner directly
 
   /// Validates if a string looks like a valid session token format.
   bool _isValidSessionTokenFormat(String token) {
@@ -28,83 +35,340 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    // Start scanner after frame renders to avoid blocking UI
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _startScanner();
+    });
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
     super.dispose();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    // Pause/resume scanner based on app lifecycle to prevent freezes
+    if (state == AppLifecycleState.paused) {
+      logger.i('Scanner: App paused, stopping scanner');
+      _controller.stop();
+      _scannerStarted = false;
+    } else if (state == AppLifecycleState.resumed && !_scannerStarted) {
+      logger.i('Scanner: App resumed, starting scanner');
+      _startScanner();
+    }
+  }
+
+  Future<void> _startScanner() async {
+    try {
+      await _controller.start();
+      _scannerStarted = true;
+      logger.i('Scanner started successfully');
+    } catch (e) {
+      logger.e('Failed to start scanner', error: e);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text(
+              'Failed to start camera. Please check permissions.',
+            ),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final pairingState = ref.watch(pairingSessionStateProvider);
-    logger.i('PairingScanScreen: Building screen, pairingState.role=${pairingState.role}, isPrimary=${pairingState.isPrimary}, sessionToken=${pairingState.sessionToken}');
+    logger.i(
+      'PairingScanScreen: Building screen, pairingState.role=${pairingState.role}, isPrimary=${pairingState.isPrimary}, sessionToken=${pairingState.sessionToken}',
+    );
+
+    // Check for session conflict - device already has an active session
+    if (pairingState.isPrimary &&
+        pairingState.sessionToken != null &&
+        !_showConflictDialog &&
+        !_conflictDialogDismissed) {
+      _showConflictDialog = true;
+    }
+
+    // Let MobileScanner handle camera permissions directly
+    // This ensures iOS shows the permission dialog and adds the toggle to Settings
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Scan QR Code'),
-      ),
-      body: Column(
+      appBar: AppBar(title: const Text('Scan QR Code')),
+      body: Stack(
         children: [
-          // Scanner view
-          Expanded(
-            child: Stack(
-              children: [
-                MobileScanner(
-                  controller: _controller,
-                  onDetect: _onQRCodeDetected,
+          // Main scan interface
+          Column(
+            children: [
+              // Scanner view
+              Expanded(
+                child: Stack(
+                  children: [
+                    MobileScanner(
+                      controller: _controller,
+                      onDetect: _onQRCodeDetected,
+                      errorBuilder: (BuildContext context, MobileScannerException error) {
+                        logger.e('MobileScanner error', error: error);
+                        return Container(
+                          color: Colors.black,
+                          child: Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                const Icon(
+                                  Icons.camera_alt,
+                                  size: 64,
+                                  color: Colors.white70,
+                                ),
+                                const SizedBox(height: 16),
+                                const Text(
+                                  'Camera Access Required',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  error.toString().contains('permission')
+                                      ? 'Camera permission is required to scan QR codes. Please go to Settings > Anchor Alarm and enable Camera.'
+                                      : 'Unable to access camera. Please check your device settings.',
+                                  style: const TextStyle(color: Colors.white70),
+                                  textAlign: TextAlign.center,
+                                ),
+                                const SizedBox(height: 24),
+                                ElevatedButton(
+                                  onPressed: () {
+                                    // Navigate back so user can try again or go to settings manually
+                                    Navigator.of(context).pop();
+                                  },
+                                  child: const Text('Go Back'),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                    // Overlay with scanning area
+                    CustomPaint(painter: QRScannerOverlay()),
+                  ],
                 ),
-                // Overlay with scanning area
-                CustomPaint(
-                  painter: QRScannerOverlay(),
+              ),
+              // Instructions
+              Container(
+                padding: const EdgeInsets.all(16),
+                color: Colors.black87,
+                child: Column(
+                  children: [
+                    const Text(
+                      'Point camera at QR code',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'The QR code should be displayed on the primary device',
+                      style: TextStyle(color: Colors.white70),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 16),
+                    // Manual entry option
+                    TextButton.icon(
+                      onPressed: () => _showManualEntryDialog(),
+                      icon: const Icon(Icons.keyboard, color: Colors.white),
+                      label: const Text(
+                        'Enter Token Manually',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-          // Instructions
-          Container(
-            padding: const EdgeInsets.all(16),
-            color: Colors.black87,
-            child: Column(
-              children: [
-                const Text(
-                  'Point camera at QR code',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
+          // Conflict dialog overlay
+          if (_showConflictDialog &&
+              pairingState.isPrimary &&
+              pairingState.sessionToken != null)
+            Container(
+              color: Colors.black54,
+              child: Center(
+                child: AlertDialog(
+                  title: const Text('Session Conflict'),
+                  content: const Text(
+                    'You already have an active session as the primary device. '
+                    'To pair with another device, you must first cancel your current session.\n\n'
+                    'What would you like to do?',
                   ),
+                  actions: [
+                    TextButton(
+                      onPressed: () async {
+                        logger.i(
+                          '❌ Cancel Session button pressed - canceling session and staying on scan screen',
+                        );
+
+                        try {
+                          // Cancel the current session
+                          final sessionNotifier = ref.read(
+                            pairingSessionStateProvider.notifier,
+                          );
+                          logger.i('🔄 Calling sessionNotifier.endSession()');
+                          await sessionNotifier.endSession();
+                          logger.i('✅ sessionNotifier.endSession() completed');
+
+                          // Hide the dialog
+                          _showConflictDialog = false;
+                          _conflictDialogDismissed =
+                              true; // Prevent showing again
+
+                          // Stay on scan screen - user can manually navigate back
+                          if (mounted) {
+                            setState(() {});
+                          }
+                        } catch (e) {
+                          logger.e('❌ Failed to cancel session', error: e);
+                          // Hide dialog even on error
+                          _showConflictDialog = false;
+                          _conflictDialogDismissed = true;
+
+                          if (mounted) {
+                            setState(() {});
+                          }
+                        }
+                      },
+                      child: const Text('Cancel Session'),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        logger.i('🔘 Continue & Cancel Session button pressed');
+
+                        try {
+                          // Cancel the current session
+                          logger.i(
+                            'Canceling current session before pairing: ${pairingState.sessionToken}',
+                          );
+                          final sessionNotifier = ref.read(
+                            pairingSessionStateProvider.notifier,
+                          );
+                          logger.i('🔄 Calling sessionNotifier.endSession()');
+                          await sessionNotifier.endSession();
+                          logger.i('✅ sessionNotifier.endSession() completed');
+
+                          // Debug: check the state after endSession
+                          final updatedState = ref.read(
+                            pairingSessionStateProvider,
+                          );
+                          logger.i(
+                            '🔍 State after endSession: role=${updatedState.role}, sessionToken=${updatedState.sessionToken}',
+                          );
+
+                          // Hide the dialog immediately - don't wait for state update
+                          logger.i(
+                            '🔙 Hiding conflict dialog immediately, staying on scan screen',
+                          );
+                          _showConflictDialog = false;
+                          _conflictDialogDismissed =
+                              true; // Prevent showing again
+
+                          // Force a rebuild to hide the dialog
+                          if (mounted) {
+                            logger.i(
+                              '🔄 Calling setState() to rebuild widget and hide dialog',
+                            );
+                            setState(() {});
+                          }
+
+                          // Show success message
+                          if (mounted) {
+                            logger.i('📱 Showing success snackbar');
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Current session canceled. You can now scan QR codes to pair with other devices.',
+                                ),
+                                backgroundColor: Colors.green,
+                              ),
+                            );
+                          } else {
+                            logger.w(
+                              '⚠️ Widget not mounted, cannot show snackbar',
+                            );
+                          }
+                        } catch (e) {
+                          logger.e(
+                            '❌ Failed to cancel current session',
+                            error: e,
+                          );
+                          // Hide dialog even on error
+                          _showConflictDialog = false;
+                          _conflictDialogDismissed =
+                              true; // Prevent showing again
+
+                          if (mounted) {
+                            logger.i(
+                              '📱 Showing error snackbar and going back',
+                            );
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Failed to cancel session: $e'),
+                                backgroundColor: Theme.of(
+                                  context,
+                                ).colorScheme.error,
+                                duration: const Duration(seconds: 5),
+                              ),
+                            );
+                            // Go back since we couldn't cancel
+                            Navigator.of(context).pop();
+                          } else {
+                            logger.w(
+                              '⚠️ Widget not mounted, cannot show error snackbar',
+                            );
+                          }
+                        }
+                      },
+                      style: TextButton.styleFrom(
+                        foregroundColor: Theme.of(context).colorScheme.error,
+                      ),
+                      child: const Text('Cancel Session & Scan'),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 8),
-                const Text(
-                  'The QR code should be displayed on the primary device',
-                  style: TextStyle(color: Colors.white70),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                // Manual entry option
-                TextButton.icon(
-                  onPressed: () => _showManualEntryDialog(),
-                  icon: const Icon(Icons.keyboard, color: Colors.white),
-                  label: const Text(
-                    'Enter Token Manually',
-                    style: TextStyle(color: Colors.white),
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
         ],
       ),
     );
   }
 
   void _onQRCodeDetected(BarcodeCapture capture) {
+    final detectStartTime = DateTime.now();
+    logger.i('🕐 QR code detected at $detectStartTime');
+
     if (_isJoining || _scannedToken != null) {
       return; // Already processing
     }
 
     // Prevent processing the same token multiple times rapidly
     final now = DateTime.now();
-    if (_lastScanTime != null && now.difference(_lastScanTime!) < const Duration(seconds: 2)) {
+    if (_lastScanTime != null &&
+        now.difference(_lastScanTime!) < const Duration(seconds: 2)) {
       return; // Too soon after last scan
     }
     _lastScanTime = now;
@@ -120,7 +384,9 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
       return;
     }
 
-    logger.i('QR Code scanned: $rawValue');
+    logger.i('🕐 Raw QR value received at ${DateTime.now()}: $rawValue');
+    logger.i('🕐 QR barcode format: ${barcode.format}');
+    logger.i('🕐 QR raw bytes length: ${barcode.rawBytes?.length ?? 0}');
 
     // Early validation for obviously invalid codes
     if (rawValue.length < 10) {
@@ -131,20 +397,23 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
     // Parse deep link or token
     String? token;
     if (rawValue.startsWith('anchorapp://join')) {
-      logger.i('Detected deep link format');
+      logger.i('🔗 Detected deep link format');
       // Parse deep link: anchorapp://join?sessionId=...&token=...
       final uri = Uri.parse(rawValue);
+      logger.i('🔗 Deep link URI: $uri');
+      logger.i('🔗 Deep link query parameters: ${uri.queryParameters}');
       token = uri.queryParameters['token'] ?? uri.queryParameters['sessionId'];
-      logger.i('Extracted token from deep link: $token');
+      logger.i('🔗 Extracted token from deep link: "$token"');
     } else {
-      logger.i('Detected direct token format');
+      logger.i('🎫 Detected direct token format');
       // Direct token - only accept if it looks like a valid session token
       final trimmed = rawValue.trim();
+      logger.i('🎫 Trimmed token: "$trimmed"');
       if (_isValidSessionTokenFormat(trimmed)) {
         token = trimmed;
-        logger.i('Accepted direct token: $token');
+        logger.i('✅ Accepted direct token: "$token"');
       } else {
-        logger.w('Rejected invalid token format: "$trimmed"');
+        logger.w('❌ Rejected invalid token format: "$trimmed"');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -169,10 +438,15 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
       return;
     }
 
-    // Check if trying to join our own session
+    // Check if trying to join our own active session
     final pairingState = ref.read(pairingSessionStateProvider);
-    if (pairingState.sessionToken == token) {
-      logger.w('Cannot join own session - device is already primary of session $token');
+    logger.i(
+      '🔍 Checking for own session: isPrimary=${pairingState.isPrimary}, sessionToken=${pairingState.sessionToken}, scannedToken=$token',
+    );
+    if (pairingState.isPrimary && pairingState.sessionToken == token) {
+      logger.w(
+        'Cannot join own session - device is already primary of session $token',
+      );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -185,22 +459,39 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
     }
 
     _scannedToken = token;
+    logger.i('🕐 Starting session join at ${DateTime.now()} for token: $token');
     _joinSession(token);
   }
 
   void _joinSession(String token) async {
+    final joinStartTime = DateTime.now();
+    logger.i('🕐 TOKEN TRACE: _joinSession called with token: "$token"');
+    logger.i(
+      '🕐 TOKEN VALIDATION: Token length: ${token.length}, isValidFormat: ${_isValidSessionTokenFormat(token)}',
+    );
+    logger.i('🕐 Session join operation started at $joinStartTime');
+
     setState(() {
       _isJoining = true;
     });
 
     try {
       final pairingNotifier = ref.read(pairingSessionStateProvider.notifier);
+      logger.i(
+        '🕐 TOKEN TRACE: Calling pairingNotifier.joinSecondarySession("$token")',
+      );
       await pairingNotifier.joinSecondarySession(token);
-      
-      logger.i('Successfully joined monitoring session: $token');
-      
+
+      final joinEndTime = DateTime.now();
+      final joinDuration = joinEndTime.difference(joinStartTime);
+      logger.i(
+        '✅ Successfully joined session at $joinEndTime (duration: ${joinDuration.inSeconds}s): $token',
+      );
+
       if (mounted) {
-        Navigator.of(context).popUntil((route) => route.isFirst); // Return to map screen
+        Navigator.of(
+          context,
+        ).popUntil((route) => route.isFirst); // Return to map screen
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Successfully joined paired session!'),
@@ -209,12 +500,8 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
         );
       }
     } catch (e, stackTrace) {
-      logger.e(
-        'Failed to join session',
-        error: e,
-        stackTrace: stackTrace,
-      );
-      
+      logger.e('Failed to join session', error: e, stackTrace: stackTrace);
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -223,7 +510,7 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
             duration: const Duration(seconds: 5),
           ),
         );
-        
+
         // Reset to allow retry
         setState(() {
           _isJoining = false;
@@ -235,7 +522,7 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
 
   void _showManualEntryDialog() {
     final tokenController = TextEditingController();
-    
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -263,9 +550,7 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
                 _joinSession(token);
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Token must be 32 characters'),
-                  ),
+                  const SnackBar(content: Text('Token must be 32 characters')),
                 );
               }
             },
@@ -299,8 +584,7 @@ class QRScannerOverlay extends CustomPainter {
       scanAreaSize,
     );
 
-    final clearPaint = Paint()
-      ..blendMode = BlendMode.clear;
+    final clearPaint = Paint()..blendMode = BlendMode.clear;
     canvas.drawRect(scanArea, clearPaint);
 
     // Draw corner brackets
@@ -350,12 +634,18 @@ class QRScannerOverlay extends CustomPainter {
     // Bottom-right
     canvas.drawLine(
       Offset(scanAreaLeft + scanAreaSize, scanAreaTop + scanAreaSize),
-      Offset(scanAreaLeft + scanAreaSize - cornerLength, scanAreaTop + scanAreaSize),
+      Offset(
+        scanAreaLeft + scanAreaSize - cornerLength,
+        scanAreaTop + scanAreaSize,
+      ),
       cornerPaint,
     );
     canvas.drawLine(
       Offset(scanAreaLeft + scanAreaSize, scanAreaTop + scanAreaSize),
-      Offset(scanAreaLeft + scanAreaSize, scanAreaTop + scanAreaSize - cornerLength),
+      Offset(
+        scanAreaLeft + scanAreaSize,
+        scanAreaTop + scanAreaSize - cornerLength,
+      ),
       cornerPaint,
     );
   }
@@ -363,4 +653,3 @@ class QRScannerOverlay extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
-

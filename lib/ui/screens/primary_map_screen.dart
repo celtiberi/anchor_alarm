@@ -6,10 +6,9 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:flutter_map_dragmarker/flutter_map_dragmarker.dart';
 import '../../providers/anchor_provider.dart';
-import '../../providers/position_provider.dart';
+import '../../providers/gps_provider.dart';
 import '../../providers/position_history_provider.dart';
 import '../../providers/settings_provider.dart';
-import '../../providers/pairing_session_provider.dart';
 import '../../models/anchor.dart';
 import '../../models/position_update.dart';
 import '../../models/alarm_event.dart';
@@ -18,10 +17,11 @@ import '../../utils/distance_calculator.dart';
 import '../../utils/distance_formatter.dart';
 import '../../utils/logger_setup.dart';
 import '../../utils/map_utils.dart';
+import '../../providers/service_providers.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../../providers/alarm_provider.dart';
 import '../../models/position_history_point.dart';
 import 'settings_screen.dart';
-import 'pairing_screen.dart';
 
 /// Map screen for primary devices with full control over anchor and monitoring.
 class PrimaryMapScreen extends ConsumerStatefulWidget {
@@ -39,6 +39,7 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
   List<LatLng>? _cachedPolygonPoints;
   LatLng? _cachedPolygonCenter;
   double? _cachedPolygonRadius;
+  List<PositionHistoryPoint>? _positionHistoryCache;
   Anchor? _previousAnchor;
   final Set<String> _shownWarningIds = {}; // Track which warnings have been shown
   bool _positionMonitoringStarted = false;
@@ -69,15 +70,24 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Optimize provider watches - only watch what changes frequently
     final anchor = ref.watch(anchorProvider);
     final position = ref.watch(positionProvider);
-    final positionHistory = ref.watch(positionHistoryProvider) ?? [];
     final alarms = ref.watch(activeAlarmsProvider) ?? [];
     final settings = ref.watch(settingsProvider);
     final isMonitoring = ref.read(activeAlarmsProvider.notifier).isMonitoring;
 
+    // Cache expensive computations
     final activeAlarms = alarms.where((a) => a.severity == Severity.alarm).toList();
     final activeWarnings = alarms.where((a) => a.severity == Severity.warning).toList();
+
+    // Only watch connectivity when needed
+    final connectivityAsync = ref.watch(connectivityProvider);
+    final connectivityList = connectivityAsync.maybeWhen(
+      data: (data) => data,
+      orElse: () => <ConnectivityResult>[],
+    );
+    final isOffline = connectivityList.isEmpty || connectivityList.contains(ConnectivityResult.none);
 
     // Auto-start monitoring when anchor is set
     ref.listen<Anchor?>(anchorProvider, (previous, next) {
@@ -134,7 +144,7 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
       appBar: _buildAppBar(),
       body: shouldShowLoading
           ? _buildLoadingState()
-          : _buildMapStack(anchor, position, positionHistory, displayAnchorPosition, activeAlarms, settings, isMonitoring, centerPoint!),
+          : _buildMapStack(anchor, position, displayAnchorPosition, activeAlarms, settings, isMonitoring, isOffline, centerPoint),
     );
   }
 
@@ -171,8 +181,8 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
     );
   }
 
-  Widget _buildMapStack(Anchor? anchor, PositionUpdate? position, List<PositionHistoryPoint> positionHistory,
-      LatLng? displayAnchorPosition, List<AlarmEvent> activeAlarms, AppSettings settings, bool isMonitoring, LatLng centerPoint) {
+  Widget _buildMapStack(Anchor? anchor, PositionUpdate? position,
+      LatLng? displayAnchorPosition, List<AlarmEvent> activeAlarms, AppSettings settings, bool isMonitoring, bool isOffline, LatLng centerPoint) {
     // Use current slider value during dragging for real-time circle updates
     final currentRadius = _isDraggingRadius ? _sliderRadiusValue : null;
 
@@ -183,33 +193,43 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
       zoomLevel = calculateZoomForRadius(effectiveRadius);
     }
 
+    // Get position history only when needed (not on every rebuild)
+    final positionHistory = _positionHistoryCache ?? ref.read(positionHistoryProvider) ?? [];
+    if (_positionHistoryCache == null) {
+      // Cache it to avoid frequent reads
+      _positionHistoryCache = positionHistory;
+      // Reset cache after a delay to allow updates
+      Future.delayed(const Duration(seconds: 10), () {
+        if (mounted) {
+          _positionHistoryCache = null;
+        }
+      });
+    }
+
     return Stack(
       children: [
         FlutterMap(
           key: _mapKey,
           mapController: _mapController,
-          options:           MapOptions(
+          options: MapOptions(
             initialCenter: centerPoint,
             initialZoom: zoomLevel,
             maxZoom: 19.0,
             minZoom: 5.0,
-            onMapReady: () {
-              // Initial map setup
-              _mapController.move(centerPoint, zoomLevel);
-            },
+            // Remove onMapReady callback that might cause issues
           ),
           children: [
             TileLayer(
               urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
               userAgentPackageName: 'com.sailorsparrot.anchoralarm',
             ),
-            // Position history trail
+            // Position history trail - only show if we have history
             if (positionHistory.isNotEmpty)
               PolylineLayer(
                 polylines: [
                   Polyline(
                     points: positionHistory.map((p) => p.position).toList(),
-                    color: Colors.blue.withOpacity(0.6),
+                    color: Colors.blue.withValues(alpha: 0.6),
                     strokeWidth: 3.0,
                   ),
                 ],
@@ -220,7 +240,7 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
                 polygons: [
                   Polygon(
                     points: _getAnchorRadiusPolygonPoints(displayAnchorPosition, currentRadius ?? anchor.radius),
-                    color: getAnchorCircleColor(anchor, position, context, currentRadius: currentRadius).withOpacity(0.2),
+                    color: getAnchorCircleColor(anchor, position, context, currentRadius: currentRadius).withValues(alpha: 0.2),
                     borderColor: getAnchorCircleColor(anchor, position, context, currentRadius: currentRadius),
                     borderStrokeWidth: 2.0,
                   ),
@@ -236,7 +256,7 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
                 markers: [
                   DragMarker(
                     point: displayAnchorPosition,
-                    size: const Size.square(80.0),
+                    size: const Size.square(120.0),
                     builder: (context, pos, isDragging) {
                       if (isDragging) {
                         _isDraggingAnchor = true;
@@ -286,7 +306,7 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
           top: activeAlarms.isNotEmpty ? 160 : 16,
           left: 16,
           right: 16,
-          child: _buildInfoCard(anchor, position, settings, isMonitoring),
+          child: _buildInfoCard(anchor, position, settings, isMonitoring, isOffline),
         ),
         // Anchor controls - positioned at bottom
         Positioned(
@@ -373,7 +393,7 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
     );
   }
 
-  Widget _buildInfoCard(Anchor? anchor, PositionUpdate? position, AppSettings settings, bool isMonitoring) {
+  Widget _buildInfoCard(Anchor? anchor, PositionUpdate? position, AppSettings settings, bool isMonitoring, bool isOffline) {
     return Card(
       elevation: 4,
       child: InkWell(
@@ -413,6 +433,29 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
                   ),
                 ],
               ),
+              // Offline indicator
+              if (isOffline)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.cloud_off,
+                        color: Colors.orange,
+                        size: 16,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Offline Mode',
+                        style: TextStyle(
+                          color: Colors.orange,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
 
               // Expanded content
               if (_isInfoCardExpanded) ...[

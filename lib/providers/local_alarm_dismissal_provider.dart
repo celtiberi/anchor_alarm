@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// Provider that tracks locally dismissed alarms on secondary devices.
 /// These dismissals are local-only and don't sync to Firebase.
 final localAlarmDismissalProvider =
-    NotifierProvider<LocalAlarmDismissalNotifier, Set<String>>(() {
+    NotifierProvider.autoDispose<LocalAlarmDismissalNotifier, Set<String>>(() {
   return LocalAlarmDismissalNotifier();
 });
 

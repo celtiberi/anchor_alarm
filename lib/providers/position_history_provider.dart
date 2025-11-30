@@ -3,12 +3,12 @@ import 'package:latlong2/latlong.dart';
 import '../models/position_update.dart';
 import '../models/anchor.dart';
 import '../models/position_history_point.dart';
-import 'position_provider.dart';
+import 'gps_provider.dart';
 import 'anchor_provider.dart';
 
 /// Provides the position history (track) when anchor is active.
 /// Returns a list of position points with timestamps, recorded at time intervals.
-final positionHistoryProvider = NotifierProvider<PositionHistoryNotifier, List<PositionHistoryPoint>>(() {
+final positionHistoryProvider = NotifierProvider.autoDispose<PositionHistoryNotifier, List<PositionHistoryPoint>>(() {
   return PositionHistoryNotifier();
 });
 

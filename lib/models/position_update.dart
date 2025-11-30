@@ -1,4 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 
 /// Represents the current GPS position of the boat.
 class PositionUpdate {
@@ -39,11 +38,10 @@ class PositionUpdate {
           'Heading must be between 0 and 360, got $heading',
         );
 
-  /// Creates PositionUpdate from Firestore document.
-  factory PositionUpdate.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+  /// Creates PositionUpdate from RTDB map.
+  factory PositionUpdate.fromMap(Map<String, dynamic> data) {
     return PositionUpdate(
-      timestamp: (data['timestamp'] as Timestamp).toDate(),
+      timestamp: DateTime.fromMillisecondsSinceEpoch((data['timestamp'] as int)),
       latitude: data['latitude'] as double,
       longitude: data['longitude'] as double,
       speed: data['speed'] as double?,
@@ -53,10 +51,10 @@ class PositionUpdate {
     );
   }
 
-  /// Converts PositionUpdate to Firestore document data.
-  Map<String, dynamic> toFirestore() {
+  /// Converts PositionUpdate to RTDB map data.
+  Map<String, dynamic> toMap() {
     return {
-      'timestamp': Timestamp.fromDate(timestamp),
+      'timestamp': timestamp.millisecondsSinceEpoch,
       'latitude': latitude,
       'longitude': longitude,
       if (speed != null) 'speed': speed,
