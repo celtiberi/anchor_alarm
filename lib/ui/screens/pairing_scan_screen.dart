@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import '../../providers/pairing_providers.dart';
+import '../../providers/pairing/pairing_providers.dart';
 import '../../utils/logger_setup.dart';
 
 /// Screen for scanning QR code to join a pairing session.
@@ -256,97 +256,16 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen>
                       child: const Text('Cancel Session'),
                     ),
                     TextButton(
-                      onPressed: () async {
-                        logger.i('🔘 Continue & Cancel Session button pressed');
-
-                        try {
-                          // Cancel the current session
-                          logger.i(
-                            'Canceling current session before pairing: ${pairingState.sessionToken}',
-                          );
-                          final sessionNotifier = ref.read(
-                            pairingSessionStateProvider.notifier,
-                          );
-                          logger.i('🔄 Calling sessionNotifier.endSession()');
-                          await sessionNotifier.endSession();
-                          logger.i('✅ sessionNotifier.endSession() completed');
-
-                          // Debug: check the state after endSession
-                          final updatedState = ref.read(
-                            pairingSessionStateProvider,
-                          );
-                          logger.i(
-                            '🔍 State after endSession: role=${updatedState.role}, sessionToken=${updatedState.sessionToken}',
-                          );
-
-                          // Hide the dialog immediately - don't wait for state update
-                          logger.i(
-                            '🔙 Hiding conflict dialog immediately, staying on scan screen',
-                          );
+                      onPressed: () {
+                        logger.i('🚪 Exit button pressed - going back without canceling session');
+                        // Just hide the dialog and navigate back
                           _showConflictDialog = false;
-                          _conflictDialogDismissed =
-                              true; // Prevent showing again
-
-                          // Force a rebuild to hide the dialog
+                        _conflictDialogDismissed = true;
                           if (mounted) {
-                            logger.i(
-                              '🔄 Calling setState() to rebuild widget and hide dialog',
-                            );
-                            setState(() {});
-                          }
-
-                          // Show success message
-                          if (mounted) {
-                            logger.i('📱 Showing success snackbar');
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Current session canceled. You can now scan QR codes to pair with other devices.',
-                                ),
-                                backgroundColor: Colors.green,
-                              ),
-                            );
-                          } else {
-                            logger.w(
-                              '⚠️ Widget not mounted, cannot show snackbar',
-                            );
-                          }
-                        } catch (e) {
-                          logger.e(
-                            '❌ Failed to cancel current session',
-                            error: e,
-                          );
-                          // Hide dialog even on error
-                          _showConflictDialog = false;
-                          _conflictDialogDismissed =
-                              true; // Prevent showing again
-
-                          if (mounted) {
-                            logger.i(
-                              '📱 Showing error snackbar and going back',
-                            );
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text('Failed to cancel session: $e'),
-                                backgroundColor: Theme.of(
-                                  context,
-                                ).colorScheme.error,
-                                duration: const Duration(seconds: 5),
-                              ),
-                            );
-                            // Go back since we couldn't cancel
                             Navigator.of(context).pop();
-                          } else {
-                            logger.w(
-                              '⚠️ Widget not mounted, cannot show error snackbar',
-                            );
-                          }
                         }
                       },
-                      style: TextButton.styleFrom(
-                        foregroundColor: Theme.of(context).colorScheme.error,
-                      ),
-                      child: const Text('Cancel Session & Scan'),
+                      child: const Text('Exit'),
                     ),
                   ],
                 ),

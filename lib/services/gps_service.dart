@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:geolocator/geolocator.dart';
 import '../models/position_update.dart';
 import '../utils/logger_setup.dart';
+import '../utils/gps_filtering.dart';
 
 /// Custom exceptions for GPS service operations.
 class GpsServiceException implements Exception {
@@ -52,20 +53,13 @@ class GpsService {
         '✅ GPS Service: Got position: lat=${position.latitude}, lon=${position.longitude}',
       );
 
-      // Normalize heading: -1.0 or invalid values mean "not available", so use null
-      // Note: position.heading is non-nullable in geolocator, but -1.0 means "not available"
-      double? heading = (position.heading >= 0 && position.heading <= 360)
-          ? position.heading
-          : null;
-
       return PositionUpdate(
         timestamp: position.timestamp, // Use GPS acquisition timestamp
         latitude: position.latitude,
         longitude: position.longitude,
-        speed: position.speed >= 0 ? position.speed : null,
-        accuracy: position.accuracy >= 0 ? position.accuracy : null,
-        altitude: position.altitude,
-        heading: heading,
+        accuracy: position.accuracy,
+        speed: position.speed,
+        heading: position.heading,
       );
     } on PermissionDeniedException {
       throw GpsPermissionDeniedException(
@@ -117,28 +111,43 @@ class GpsService {
     logger.i(
       'Starting GPS stream with MAX ACCURACY settings: accuracy=$accuracy, distanceFilter=0m, no enforced interval (updates as soon as available), platform=${Platform.operatingSystem}, settingsType=${locationSettings.runtimeType}',
     );
+    logger.d(
+      '🚀 GPS SERVICE: Starting position stream with settings: $locationSettings',
+    );
+
     return Geolocator.getPositionStream(
       locationSettings: locationSettings,
     ).map((position) {
+      logger.d(
+        '📍 GPS SERVICE: Raw position received from geolocator - lat=${position.latitude.toStringAsFixed(6)}, lon=${position.longitude.toStringAsFixed(6)}',
+      );
       // GPS position received - passed to position stream
       // Use position.timestamp for accuracy (when GPS acquired the position)
       final timestamp = position.timestamp;
 
-      // Normalize heading: -1.0 or invalid values mean "not available", so use null
-      // Note: position.heading is non-nullable in geolocator, but -1.0 means "not available"
-      double? heading = (position.heading >= 0 && position.heading <= 360)
-          ? position.heading
-          : null;
-
-      return PositionUpdate(
+      final rawPositionUpdate = PositionUpdate(
         timestamp: timestamp,
         latitude: position.latitude,
         longitude: position.longitude,
-        speed: position.speed >= 0 ? position.speed : null,
-        accuracy: position.accuracy >= 0 ? position.accuracy : null,
-        altitude: position.altitude,
-        heading: heading,
+        accuracy: position.accuracy,
+        speed: position.speed,
+        heading: position.heading,
       );
+
+      // Apply GPS filtering to handle noisy marine GPS data
+      final filteredPosition = GpsFiltering.filterAndSmooth(rawPositionUpdate);
+
+      if (filteredPosition != null) {
+        logger.d(
+          '📍 GPS SERVICE: Filtered position emitted - lat=${filteredPosition.latitude.toStringAsFixed(6)}, lon=${filteredPosition.longitude.toStringAsFixed(6)}',
+        );
+        return filteredPosition;
+      } else {
+        logger.d('📍 GPS SERVICE: Position filtered out due to poor accuracy');
+        // Return the raw position anyway for cases where we want to show something rather than nothing
+        // This ensures the stream doesn't stall, but downstream consumers can choose to ignore poor accuracy
+        return rawPositionUpdate;
+      }
     });
   }
 

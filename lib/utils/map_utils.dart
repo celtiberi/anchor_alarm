@@ -47,5 +47,5 @@ double calculateZoomForRadius(double radiusMeters) {
 
   // Calculate zoom: larger radius needs lower zoom
   final zoom = baseZoom - math.log(radiusMeters / baseRadius) / math.ln2;
-  return zoom.clamp(5.0, 19.0); // Clamp to reasonable zoom range
+  return zoom.clamp(5.0, 22.0); // Clamp to reasonable zoom range (increased max for small radii)
 }

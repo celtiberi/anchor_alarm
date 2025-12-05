@@ -13,7 +13,9 @@ import 'ui/screens/primary_map_screen.dart';
 import 'ui/screens/secondary_map_screen.dart';
 import 'providers/settings_provider.dart';
 import 'providers/service_providers.dart';
-import 'providers/pairing_providers.dart';
+import 'providers/pairing/pairing_providers.dart';
+import 'providers/secondary_auto_disconnect_provider.dart';
+import 'providers/secondary_session_monitor_provider.dart';
 import 'services/notification_service.dart';
 import 'services/background_alarm_service.dart';
 import 'models/app_settings.dart';
@@ -30,48 +32,62 @@ void main() async {
       // Initialize Flutter bindings inside the zone
       WidgetsFlutterBinding.ensureInitialized();
 
-      // Initialize Firebase with proper error handling
+      // Initialize Firebase as a singleton - prevent multiple initializations
       try {
-        await Firebase.initializeApp(
-          options: DefaultFirebaseOptions.currentPlatform,
+        // Check if our specific Firebase app is already initialized
+        final targetProjectId = DefaultFirebaseOptions.currentPlatform.projectId;
+        FirebaseApp? existingApp;
+        try {
+          existingApp = Firebase.apps.firstWhere(
+            (app) => app.options.projectId == targetProjectId,
+          );
+        } catch (e) {
+          existingApp = null;
+        }
+
+        if (existingApp != null) {
+          print('🔥🔥🔥 FIREBASE SINGLETON: App already initialized for project: $targetProjectId');
+          print('🔥🔥🔥 FIREBASE SINGLETON: Using existing Firebase app: ${existingApp.name}');
+          logger.i('✅ Firebase app already initialized for project: $targetProjectId');
+          logger.i('✅ Using existing Firebase app: ${existingApp.name}');
+        } else {
+          print('🔥🔥🔥 FIREBASE SINGLETON: Initializing Firebase for project: $targetProjectId');
+          await Firebase.initializeApp(
+            options: DefaultFirebaseOptions.currentPlatform,
+          );
+          print('🔥🔥🔥 FIREBASE SINGLETON: Firebase initialized successfully for project: $targetProjectId');
+          logger.i('✅ Firebase initialized successfully for project: $targetProjectId');
+        }
+
+        // Verify the app is properly initialized
+        final app = Firebase.apps.firstWhere(
+          (app) => app.options.projectId == targetProjectId,
         );
-        logger.i('Firebase initialized successfully');
-        logger.i(
-          'Firebase app databaseURL: ${Firebase.app().options.databaseURL}',
-        );
+        print('🔥🔥🔥 FIREBASE SINGLETON: App verified: ${app.name}, URL: ${app.options.databaseURL}');
+        logger.i('✅ Firebase app verified: ${app.name}');
+        logger.i('✅ Database URL: ${app.options.databaseURL}');
 
         // Log Firebase app details
         final auth = FirebaseAuth.instance;
-        logger.i('Auth app: ${auth.app.name}');
-        logger.i(
-          'Firebase Database URL configured: ${DefaultFirebaseOptions.currentPlatform.databaseURL}',
-        );
+        print('🔥🔥🔥 FIREBASE SINGLETON: Auth configured for app: ${auth.app.name}');
+        logger.i('✅ Auth configured for app: ${auth.app.name}');
+
       } catch (e) {
+        print('🔥🔥🔥 FIREBASE SINGLETON ERROR: $e');
+        logger.e('❌ Failed to initialize Firebase', error: e);
+        // Check if it's a duplicate app error (shouldn't happen with our singleton check)
         if (e.toString().contains('duplicate-app')) {
-          logger.i(
-            'Firebase already initialized (hot reload), using existing instance',
-          );
-          // Log Firebase app details for existing instance
-          final auth = FirebaseAuth.instance;
-          logger.i('Auth app: ${auth.app.name}');
-          logger.i(
-            'Firebase Database URL configured: ${DefaultFirebaseOptions.currentPlatform.databaseURL}',
-          );
-        } else {
-          logger.w(
-            'Failed to initialize Firebase (likely offline), operating in offline mode',
-            error: e,
-          );
-          // Continue in offline mode - Firebase will work once network returns
-          logger.i(
-            '🚢 Operating in offline mode - GPS, anchor monitoring, and alarms will work normally',
-          );
+          print('🔥🔥🔥 FIREBASE SINGLETON WARNING: Duplicate Firebase app detected');
+          logger.w('⚠️ Duplicate Firebase app detected despite singleton check');
         }
+        // Continue in offline mode for other errors
+        print('🔥🔥🔥 FIREBASE SINGLETON: Operating in offline mode due to Firebase initialization failure');
+        logger.i('🚢 Operating in offline mode due to Firebase initialization failure');
       }
 
       // Initialize repository and ensure authentication early
       final repo = RealtimeDatabaseRepository();
-      repo.init(); // RTDB offline persistence
+      // Persistence is now set up in constructor
 
       try {
         await repo.ensureAuthenticated();
@@ -79,21 +95,24 @@ void main() async {
 
         // Run initial cleanup and set up periodic cleanup (every 6 hours)
         try {
+          logger.i('🧹 Starting initial session cleanup');
           await repo.deleteExpiredSessions();
           logger.i('🧹 Initial session cleanup completed');
-
-          // Set up periodic cleanup every 6 hours
-          Timer.periodic(const Duration(hours: 6), (timer) async {
-            try {
-              await repo.deleteExpiredSessions();
-              logger.i('🧹 Periodic session cleanup completed');
-            } catch (e) {
-              logger.w('Periodic session cleanup failed', error: e);
-            }
-          });
-        } catch (cleanupError) {
-          logger.w('Initial session cleanup failed', error: cleanupError);
+        } catch (e) {
+          logger.w('🧹 Initial session cleanup failed, continuing with app startup', error: e);
+          // Don't fail app startup due to cleanup issues
         }
+
+        // Set up periodic cleanup every 6 hours
+        Timer.periodic(const Duration(hours: 6), (timer) async {
+          try {
+            await repo.deleteExpiredSessions();
+            logger.i('🧹 Periodic session cleanup completed');
+          } catch (e) {
+            logger.w('Periodic session cleanup failed', error: e);
+            // Continue running - cleanup failures shouldn't stop the app
+          }
+        });
       } catch (authError) {
         logger.w(
           'Failed to initialize authentication (likely offline or disabled), operating in offline mode',
@@ -217,13 +236,16 @@ class MapScreenRouter extends ConsumerWidget {
       'MapScreenRouter: pairingState.role=${pairingState.role}, isSecondary=${pairingState.isSecondary}, sessionToken=${pairingState.sessionToken}',
     );
 
-    // Show appropriate screen based on pairing role
-    // Default to primary screen if no session exists yet
-    if (pairingState.isSecondary && pairingState.sessionToken != null) {
-      logger.i('MapScreenRouter: Showing SecondaryMapScreen');
+    // Show appropriate screen based on pairing role and session validity
+    // Default to primary screen if no valid session exists
+    final sessionAsync = ref.watch(secondarySessionMonitorProvider);
+    final session = sessionAsync.value;
+
+    if (pairingState.isSecondary && pairingState.sessionToken != null && session != null && session.isActive) {
+      logger.i('MapScreenRouter: Showing SecondaryMapScreen (active session: ${session.token})');
       return const SecondaryMapScreen();
     } else {
-      logger.i('MapScreenRouter: Showing PrimaryMapScreen');
+      logger.i('MapScreenRouter: Showing PrimaryMapScreen (pairingState: ${pairingState.role}, sessionToken: ${pairingState.sessionToken}, session: ${session?.token ?? 'null'}, active: ${session?.isActive ?? 'null'})');
       return const PrimaryMapScreen();
     }
   }
@@ -305,6 +327,9 @@ class _AnchorAlarmAppState extends ConsumerState<AnchorAlarmApp> {
         });
       }
     });
+
+    // Auto-disconnect secondary devices when session becomes inactive/missing
+    ref.watch(secondaryAutoDisconnectProvider);
 
     final settings = ref.watch(settingsProvider);
 

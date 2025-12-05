@@ -6,11 +6,12 @@ import '../services/alarm_service.dart';
 import '../services/notification_service.dart';
 import '../services/background_alarm_service.dart';
 import '../utils/logger_setup.dart';
+import '../utils/gps_filtering.dart';
 import 'anchor_provider.dart';
 import 'gps_provider.dart';
 import 'service_providers.dart';
 import 'settings_provider.dart';
-import 'pairing_providers.dart';
+import 'pairing/pairing_providers.dart';
 
 /// Provides active alarms state.
 final activeAlarmsProvider =
@@ -59,7 +60,6 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
   // Cached filtered results for performance
   List<AlarmEvent>? _cachedDriftAlarms;
   List<AlarmEvent>? _cachedGpsLostWarnings;
-  List<AlarmEvent>? _cachedGpsInaccurateWarnings;
   List<AlarmEvent>? _lastState; // Track state changes
 
   List<AlarmEvent> get _driftAlarms {
@@ -80,20 +80,11 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
         .toList();
   }
 
-  List<AlarmEvent> get _gpsInaccurateWarnings {
-    if (_lastState != state) {
-      _invalidateCaches();
-    }
-    return _cachedGpsInaccurateWarnings ??= state
-        .where((a) => a.type == AlarmType.gpsInaccurate)
-        .toList();
-  }
 
   void _invalidateCaches() {
     _lastState = List.from(state);
     _cachedDriftAlarms = null;
     _cachedGpsLostWarnings = null;
-    _cachedGpsInaccurateWarnings = null;
   }
 
   @override
@@ -105,6 +96,27 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
     // Set initial settings on background service
     final initialSettings = ref.read(settingsProvider);
     _backgroundService.updateSettings(initialSettings);
+
+    // Set up GPS monitoring coordination
+    final gpsNotifier = ref.read(gpsProvider.notifier);
+    gpsNotifier.onMonitoringStateChanged = (bool isForegroundActive) {
+      if (isForegroundActive) {
+        // Foreground GPS started - stop background GPS if it's running and we have an anchor
+        logger.i('🛰️ Foreground GPS started - stopping background GPS to prevent conflicts');
+        if (_isMonitoring && !_isPaused) {
+          _backgroundService.stopMonitoring();
+        }
+      } else {
+        // Foreground GPS stopped - restart background GPS if we should be monitoring
+        logger.i('🛰️ Foreground GPS stopped - restarting background GPS if monitoring active');
+        if (_isMonitoring && !_isPaused) {
+          final anchor = ref.read(anchorProvider);
+          if (anchor != null) {
+            _backgroundService.startMonitoring(anchor);
+          }
+        }
+      }
+    };
 
     // Listen to settings changes and update cached durations
     ref.listen(settingsProvider, (previous, newSettings) {
@@ -217,7 +229,14 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
       }
 
       // Start background service for alarms when app is minimized
+      // But don't start if foreground GPS is already active (to prevent conflicts)
+      final isForegroundGpsActive = ref.read(gpsProvider.notifier).isMonitoring;
+      if (!isForegroundGpsActive) {
+        logger.i('🛰️ Starting background GPS - no foreground GPS conflict');
       _backgroundService.startMonitoring(anchor);
+      } else {
+        logger.i('🛰️ Skipping background GPS start - foreground GPS already active');
+      }
 
       // Check GPS status and alarm conditions immediately when starting monitoring
       _checkGpsWarnings();
@@ -235,6 +254,70 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
       logger.i('Alarm monitoring started successfully');
     } catch (e, stackTrace) {
       logger.e('Failed to start monitoring', error: e, stackTrace: stackTrace);
+      _isMonitoring = false;
+      rethrow;
+    }
+  }
+
+  /// Async version of startMonitoring that properly awaits background service initialization.
+  /// Use this when you need to ensure monitoring is fully started before continuing.
+  Future<void> startMonitoringAsync() async {
+    // Check if we have an anchor before starting monitoring
+    final anchor = ref.read(anchorProvider);
+    if (anchor == null || !anchor.isActive) {
+      logger.w('Cannot start monitoring: no active anchor set');
+      throw StateError('No active anchor set');
+    }
+
+    if (_isMonitoring) {
+      logger.d('Monitoring already active, skipping start');
+      return;
+    }
+
+    logger.i(
+      'Starting alarm monitoring (async) for anchor at ${anchor.latitude}, ${anchor.longitude}',
+    );
+
+    // Reset GPS filters when starting monitoring to ensure clean state
+    GpsFiltering.resetFilters();
+    logger.d('🛰️ GPS filters reset for new monitoring session');
+
+    _isMonitoring = true;
+
+    try {
+      // Initialize GPS status tracking
+      final currentPosition = ref.read(positionProvider);
+      if (currentPosition != null) {
+        _lastPositionTime = currentPosition.timestamp;
+      } else {
+        _lastPositionTime = null;
+      }
+
+      // Start background service for alarms when app is minimized
+      // Always await the background service start to ensure it's fully initialized
+      final isForegroundGpsActive = ref.read(gpsProvider.notifier).isMonitoring;
+      if (!isForegroundGpsActive) {
+        logger.i('🛰️ Starting background GPS - no foreground GPS conflict');
+        await _backgroundService.startMonitoring(anchor);
+      } else {
+        logger.i('🛰️ Skipping background GPS start - foreground GPS already active');
+      }
+
+      // Check GPS status and alarm conditions immediately when starting monitoring
+      _checkGpsWarnings();
+      _checkAlarmConditions();
+
+      // Periodic check for GPS lost detection (position updates handle alarm checking)
+      _checkTimer?.cancel();
+      _checkTimer = Timer.periodic(_gpsCheckInterval, (_) {
+        if (_isMonitoring && !_isPaused) {
+          _checkGpsWarnings();
+        }
+      });
+
+      logger.i('Alarm monitoring started successfully (async)');
+    } catch (e, stackTrace) {
+      logger.e('Failed to start monitoring (async)', error: e, stackTrace: stackTrace);
       _isMonitoring = false;
       rethrow;
     }
@@ -291,7 +374,6 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
     // Batch all provider reads at the start for consistency and performance
     final position = ref.read(positionProvider);
     final anchor = ref.read(anchorProvider);
-    final settings = ref.read(settingsProvider);
     final now = DateTime.now();
 
     // Check for GPS lost warning with hysteresis (no position update in last threshold period)
@@ -331,45 +413,6 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
       }
     }
 
-    // Check for GPS inaccurate warning (if position exists but accuracy is poor)
-    if (position != null && position.accuracy != null) {
-      if (position.accuracy! > settings.gpsAccuracyThreshold) {
-        if (_gpsInaccurateWarnings.isEmpty) {
-          final warning = _alarmService.createGpsInaccurateWarning(
-            position,
-            anchor,
-          );
-          _addWarning(warning);
-        } else {
-          // Update all existing inaccurate warnings more efficiently
-          final newState = List<AlarmEvent>.from(state);
-          bool updatedAny = false;
-
-          for (final warning in _gpsInaccurateWarnings) {
-            final existingIndex = newState.indexWhere(
-              (a) => a.id == warning.id,
-            );
-            if (existingIndex >= 0) {
-              newState[existingIndex] = newState[existingIndex].copyWith(
-                timestamp: position.timestamp,
-                latitude: position.latitude,
-                longitude: position.longitude,
-              );
-              updatedAny = true;
-            }
-          }
-
-          if (updatedAny) {
-            state = newState;
-          }
-        }
-      } else {
-        // GPS accuracy is good, remove inaccurate warnings
-        for (final warning in _gpsInaccurateWarnings) {
-          _dismissWarning(warning.id);
-        }
-      }
-    }
   }
 
   /// Checks if alarm conditions are met (drift exceeded).
@@ -407,7 +450,8 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
               logger.i(
                 'Auto-dismissing drift alarm (distance ${distance.toStringAsFixed(1)}m < hysteresis radius ${hysteresisRadius.toStringAsFixed(1)}m)',
               );
-              _dismissAlarm(alarm.id, stopMonitoring: false);
+              // Use autoDismissAlarm which syncs to Firebase and keeps monitoring active
+              autoDismissAlarm(alarm.id);
             }
           }
         }
@@ -498,21 +542,58 @@ class AlarmNotifier extends Notifier<List<AlarmEvent>> {
       return; // Already dismissed or doesn't exist
     }
 
+    logger.i('🔔 Acknowledging alarm: $alarmId (severity: ${alarm.severity})');
+
     // Sync dismissal to Firebase first (for paired devices)
     final pairingState = ref.read(pairingSessionStateProvider);
     if (pairingState.isPrimary && pairingState.sessionToken != null) {
       try {
         final realtimeDb = ref.read(realtimeDatabaseRepositoryProvider);
         await realtimeDb.acknowledgeAlarm(pairingState.sessionToken!, alarmId);
-        logger.i('Synced alarm dismissal to Firebase: $alarmId');
+        logger.i('✅ Synced alarm dismissal to Firebase: $alarmId for session ${pairingState.sessionToken}');
       } catch (e) {
-        logger.e('Failed to sync alarm dismissal to Firebase', error: e);
-        // Continue with local dismissal even if Firebase sync fails
+        logger.e('❌ Failed to sync alarm dismissal to Firebase - NOT dismissing locally', error: e);
+        // Don't dismiss locally if Firebase sync fails - this ensures secondary devices stay in sync
+        return;
       }
+    } else {
+      logger.i('ℹ️ Not syncing to Firebase - not primary device or no session');
     }
 
     // Only stop monitoring for alarms (not warnings)
     _dismissAlarm(alarmId, stopMonitoring: alarm.severity == Severity.alarm);
+  }
+
+  /// Auto-dismisses an alarm (for automatic dismissal when returning to safe zone - keeps monitoring).
+  Future<void> autoDismissAlarm(String alarmId) async {
+    AlarmEvent? alarm;
+    try {
+      alarm = state.firstWhere((a) => a.id == alarmId);
+    } catch (e) {
+      logger.w('Attempted to auto-dismiss non-existent alarm: $alarmId');
+      return; // Already dismissed or doesn't exist
+    }
+
+    logger.i('🔄 Auto-dismissing alarm: $alarmId (severity: ${alarm.severity})');
+
+    // Sync dismissal to Firebase first (for paired devices)
+    final pairingState = ref.read(pairingSessionStateProvider);
+    if (pairingState.isPrimary && pairingState.sessionToken != null) {
+      try {
+        final realtimeDb = ref.read(realtimeDatabaseRepositoryProvider);
+        await realtimeDb.acknowledgeAlarm(pairingState.sessionToken!, alarmId);
+        logger.i('✅ Synced auto-dismissal to Firebase: $alarmId for session ${pairingState.sessionToken}');
+      } catch (e) {
+        logger.e('❌ Failed to sync auto-dismissal to Firebase - NOT dismissing locally', error: e);
+        // Don't dismiss locally if Firebase sync fails - this ensures secondary devices stay in sync
+        return;
+      }
+    } else {
+      logger.i('ℹ️ Not syncing to Firebase - not primary device or no session');
+    }
+
+    // Auto-dismissal keeps monitoring active (don't stop monitoring)
+    _dismissAlarm(alarmId, stopMonitoring: false);
   }
 
   /// Internal method to dismiss an alarm.

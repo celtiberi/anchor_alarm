@@ -2,12 +2,14 @@ import 'package:dio/dio.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../utils/logger_setup.dart';
 import '../models/tide_cache.dart';
+import 'bandwidth_tracker.dart';
 
 /// Service for querying tide information.
 /// Uses WorldTides API (free tier available for international waters).
 /// Caches tide data for 12 hours to minimize API calls.
 class TideService {
   final Dio _dio = Dio();
+  final BandwidthTracker? _bandwidthTracker;
   
   // WorldTides API endpoint
   // Note: Requires API key - user should set this in settings
@@ -18,6 +20,8 @@ class TideService {
   static const String _cacheBoxName = 'tide_cache';
   
   String? _apiKey;
+
+  TideService({BandwidthTracker? bandwidthTracker}) : _bandwidthTracker = bandwidthTracker;
   
   /// Sets the WorldTides API key.
   /// Get a free key at: https://www.worldtides.info/api
@@ -107,6 +111,10 @@ class TideService {
           'hours': 12, // Get 12 hours of data for caching
         },
       );
+
+      // Track HTTP bandwidth usage
+      final responseSize = response.data?.toString().length ?? 0;
+      _bandwidthTracker?.recordHttpRequest(bytesReceived: responseSize * 2); // UTF-8 estimation
       
       if (response.statusCode == 200 && response.data != null) {
         final data = response.data as Map<String, dynamic>;
@@ -206,6 +214,10 @@ class TideService {
           'hours': 12, // Get 12 hours for caching
         },
       );
+
+      // Track HTTP bandwidth usage
+      final responseSize = response.data?.toString().length ?? 0;
+      _bandwidthTracker?.recordHttpRequest(bytesReceived: responseSize * 2); // UTF-8 estimation
       
       if (response.statusCode == 200 && response.data != null) {
         final data = response.data as Map<String, dynamic>;

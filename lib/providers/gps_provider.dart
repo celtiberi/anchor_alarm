@@ -50,6 +50,9 @@ class GpsNotifier extends Notifier<PositionUpdate?> {
   late final GpsService _gpsService = ref.read(gpsServiceProvider);
   StreamSubscription<PositionUpdate>? _positionSubscription;
 
+  /// Callback to notify when foreground GPS monitoring state changes
+  void Function(bool isMonitoring)? onMonitoringStateChanged;
+
   @override
   PositionUpdate? build() {
     // Set up disposal to clean up GPS monitoring when provider is disposed
@@ -69,11 +72,12 @@ class GpsNotifier extends Notifier<PositionUpdate?> {
   /// Starts monitoring position updates with maximum responsiveness for anchor alarm accuracy.
   Future<void> startMonitoring() async {
     if (_positionSubscription != null) {
+      logger.w('GPS monitoring already active, skipping start');
       return; // Already monitoring
     }
 
     try {
-      logger.i('Starting GPS monitoring...');
+      logger.i('🚀 STARTING GPS MONITORING...');
 
       // Check if location services are enabled
       final isEnabled = await _gpsService.isLocationServiceEnabled();
@@ -97,16 +101,20 @@ class GpsNotifier extends Notifier<PositionUpdate?> {
       logger.i('Starting position stream...');
       _positionSubscription = _gpsService.getPositionStream().listen(
         (position) {
+          logger.d('🔄 GPS PROVIDER: Position update received - lat=${position.latitude.toStringAsFixed(6)}, lon=${position.longitude.toStringAsFixed(6)}, accuracy=${position.accuracy?.toStringAsFixed(1)}m');
           // Check if provider is still mounted and has an active subscription
           if (ref.mounted && _positionSubscription != null) {
             try {
+              final oldPosition = state;
               state = position;
+              logger.d('✅ GPS PROVIDER: State updated successfully. Old: ${oldPosition != null ? 'lat=${oldPosition.latitude.toStringAsFixed(6)}, lon=${oldPosition.longitude.toStringAsFixed(6)}' : 'null'} → New: lat=${position.latitude.toStringAsFixed(6)}, lon=${position.longitude.toStringAsFixed(6)}');
             } catch (e) {
-              // Provider might be disposed during state update
               logger.w(
                 'Failed to update position state - provider may be disposed: $e',
               );
             }
+          } else {
+            logger.w('🚨 GPS PROVIDER: Provider not mounted or subscription cancelled - ignoring position update');
           }
         },
         onError: (error) {
@@ -126,6 +134,8 @@ class GpsNotifier extends Notifier<PositionUpdate?> {
         cancelOnError: false, // Continue monitoring even after errors
       );
       logger.i('GPS monitoring started successfully');
+      // Notify listeners that foreground GPS is now active
+      onMonitoringStateChanged?.call(true);
       // Update reactive monitoring state
     } catch (e, stackTrace) {
       logger.e(
@@ -145,6 +155,8 @@ class GpsNotifier extends Notifier<PositionUpdate?> {
       _positionSubscription!.cancel();
       _positionSubscription = null;
       logger.d('GPS position monitoring stopped');
+      // Notify listeners that foreground GPS is now inactive
+      onMonitoringStateChanged?.call(false);
     }
   }
 

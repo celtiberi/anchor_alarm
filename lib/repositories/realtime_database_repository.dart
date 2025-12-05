@@ -1,34 +1,113 @@
 import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
-import '../models/position_update.dart';
 import '../models/alarm_event.dart';
 import '../models/pairing_session.dart';
 import '../models/device_info.dart';
 import '../utils/logger_setup.dart';
 import '../firebase_options.dart';
+import '../services/bandwidth_tracker.dart';
 
 /// Repository for Firebase Realtime Database operations.
 /// Migrated from Firestore to reduce costs and optimize for real-time sync.
 class RealtimeDatabaseRepository {
+  /// Cached database instance with persistence already configured.
+  /// This ensures persistence is set only once, before any database operations.
+  static FirebaseDatabase? _cachedInstance;
+
+  /// Gets or creates a FirebaseDatabase instance with persistence enabled.
+  /// Must be called before any other database operations.
+  /// This is a static method to ensure persistence is set before any database access.
+  static FirebaseDatabase _getDatabaseInstance() {
+    if (_cachedInstance != null) {
+      logger.i('🔧 Using cached FirebaseDatabase instance');
+      return _cachedInstance!;
+    }
+
+    print('🔧🔧🔧 RTDB REPO: Creating FirebaseDatabase instance');
+    print(
+      '🔧🔧🔧 RTDB REPO: Available Firebase apps: ${Firebase.apps.length} total',
+    );
+    print(
+      '🔧🔧🔧 RTDB REPO: Firebase apps: ${Firebase.apps.map((app) => '${app.name} (${app.options.projectId})').join(', ')}',
+    );
+
+    if (Firebase.apps.isEmpty) {
+      throw StateError('No Firebase apps available - Firebase not initialized');
+    }
+
+    // Always use the app with the correct project ID
+    final targetProjectId = DefaultFirebaseOptions.currentPlatform.projectId;
+    final app = Firebase.apps.firstWhere(
+      (app) => app.options.projectId == targetProjectId,
+      orElse: () => throw StateError(
+        'Firebase app with project ID $targetProjectId not found. Available apps: ${Firebase.apps.map((app) => app.options.projectId).join(', ')}',
+      ),
+    );
+
+    print(
+      '🔧🔧🔧 RTDB REPO: Using Firebase app: ${app.name} with projectId: ${app.options.projectId}',
+    );
+    print(
+      '🔧🔧🔧 RTDB REPO: Target database URL: ${DefaultFirebaseOptions.currentPlatform.databaseURL}',
+    );
+    print('🔧🔧🔧 RTDB REPO: App database URL: ${app.options.databaseURL}');
+
+    logger.i(
+      '🔧 Using Firebase app: ${app.name} with projectId: ${app.options.projectId}',
+    );
+    logger.i(
+      '🔧 Target database URL: ${DefaultFirebaseOptions.currentPlatform.databaseURL}',
+    );
+    logger.i('🔧 App database URL: ${app.options.databaseURL}');
+
+    // Check for URL mismatch
+    if (app.options.databaseURL !=
+        DefaultFirebaseOptions.currentPlatform.databaseURL) {
+      print(
+        '⚠️⚠️⚠️ RTDB REPO WARNING: App database URL (${app.options.databaseURL}) does not match target URL (${DefaultFirebaseOptions.currentPlatform.databaseURL})',
+      );
+      logger.w(
+        '⚠️ App database URL (${app.options.databaseURL}) does not match target URL (${DefaultFirebaseOptions.currentPlatform.databaseURL})',
+      );
+    }
+
+    final instance = FirebaseDatabase.instanceFor(
+      app: app,
+      databaseURL: DefaultFirebaseOptions.currentPlatform.databaseURL,
+    );
+
+    print('🔧🔧🔧 RTDB REPO: FirebaseDatabase instance created successfully');
+    logger.i('🔧 FirebaseDatabase instance created successfully');
+
+    // Set persistence BEFORE creating any references or using the instance
+    // These calls must happen before any other database operations
+    try {
+      instance.setPersistenceEnabled(true);
+      instance.setPersistenceCacheSizeBytes(10000000); // 10MB
+      logger.i('✅ Firebase persistence enabled (10MB cache)');
+    } catch (e) {
+      // If persistence is already set, that's fine - just log it
+      logger.w('⚠️ Could not set persistence (may already be set): $e');
+    }
+
+    _cachedInstance = instance;
+    return instance;
+  }
+
   final DatabaseReference _db;
   final FirebaseDatabase _databaseInstance;
   final FirebaseAuth _auth;
+  final BandwidthTracker? _bandwidthTracker;
 
-  RealtimeDatabaseRepository({DatabaseReference? db, FirebaseAuth? auth})
-    : _databaseInstance = FirebaseDatabase.instanceFor(
-        // Explicitly specify the app and databaseURL
-        app: Firebase.app(),
-        databaseURL: DefaultFirebaseOptions.currentPlatform.databaseURL,
-      ),
-      _db =
-          db ??
-          FirebaseDatabase.instanceFor(
-            // Do the same for the DatabaseReference's underlying instance
-            app: Firebase.app(),
-            databaseURL: DefaultFirebaseOptions.currentPlatform.databaseURL,
-          ).ref(),
-      _auth = auth ?? FirebaseAuth.instance {
+  RealtimeDatabaseRepository({
+    DatabaseReference? db,
+    FirebaseAuth? auth,
+    BandwidthTracker? bandwidthTracker,
+  }) : _databaseInstance = _getDatabaseInstance(),
+       _db = db ?? _getDatabaseInstance().ref(),
+       _auth = auth ?? FirebaseAuth.instance,
+       _bandwidthTracker = bandwidthTracker {
     logger.i(
       'RealtimeDatabaseRepository created with ${auth != null ? "provided auth" : "default auth"}',
     );
@@ -38,49 +117,66 @@ class RealtimeDatabaseRepository {
     logger.i(
       'Database instance URL (_databaseInstance.databaseURL): ${_databaseInstance.databaseURL}',
     ); // Keep logging for diagnostic purposes
+    logger.i('Database instance app name: ${_databaseInstance.app.name}');
+    logger.i(
+      'All Firebase apps: ${Firebase.apps.map((app) => '${app.name}: ${app.options.databaseURL}').join(', ')}',
+    );
     logger.i('Database reference path (_db.path): ${_db.path}');
   }
 
-  /// Initialize RTDB with offline persistence
-  void init() {
-    // Configure persistence on the database instance
-    _databaseInstance.setPersistenceEnabled(true);
-    _databaseInstance.setPersistenceCacheSizeBytes(10000000); // 10MB
-    logger.i('RealtimeDatabase persistence enabled with 10MB cache');
-    logger.i('Database instance URL: ${_databaseInstance.databaseURL}');
-    logger.i('Firebase app databaseURL: ${Firebase.app().options.databaseURL}');
+  /// Estimates the byte size of data being sent to Firebase.
+  int _estimateDataSize(dynamic data) {
+    if (data == null) return 0;
+
+    // Convert to JSON string and get byte length (UTF-8 approximation)
+    final jsonString = data.toString();
+    return jsonString.length * 2; // Rough UTF-8 estimation
   }
 
-  /// Helper to ensure authenticated state
+  /// Helper to ensure authenticated state with forced token refresh
   Future<void> ensureAuthenticated() async {
-    if (_auth.currentUser != null) {
-      logger.i('Already authenticated: ${_auth.currentUser!.uid}');
-      return;
-    }
-
-    logger.w('No authenticated user, attempting anonymous sign-in...');
+    logger.i('🔐 AUTH CHECK: Starting ensureAuthenticated...');
     try {
-      final credential = await _auth.signInAnonymously();
-      logger.i('Signed in anonymously: ${credential.user?.uid}');
-
-      // Wait for token refresh and state sync
-      await credential.user?.getIdToken(true); // Force token refresh
-      await _auth.authStateChanges().firstWhere(
-        (user) => user != null,
-        orElse: () => throw StateError('Auth state sync failed'),
-      );
-      logger.i('Auth token refreshed and state confirmed');
-    } catch (authError) {
-      logger.e(
-        'Failed to authenticate: ${authError.toString()}',
-        error: authError,
-      );
-      if (authError is FirebaseAuthException) {
-        logger.e(
-          'Error code: ${authError.code}, Message: ${authError.message}',
+      // Always force reload and token refresh to handle restart cases
+      if (_auth.currentUser != null) {
+        logger.i(
+          '🔐 AUTH CHECK: Found existing user (${_auth.currentUser!.uid}), forcing reload and token refresh...',
+        );
+        await _auth.currentUser!.reload();
+        await _auth.currentUser!.getIdToken(true);
+        logger.i(
+          '🔐 AUTH CHECK: Auth state reloaded and token refreshed: ${_auth.currentUser!.uid}',
+        );
+      } else {
+        logger.w('🔐 AUTH CHECK: No current user, signing in anonymously...');
+        final credential = await _auth.signInAnonymously();
+        await credential.user?.getIdToken(true);
+        logger.i(
+          '🔐 AUTH CHECK: Signed in anonymously: ${credential.user?.uid}',
         );
       }
-      rethrow;
+
+      // Wait for auth state confirmation
+      await _auth.authStateChanges().firstWhere((user) => user != null);
+      logger.i(
+        '🔐 AUTH CHECK: Auth state confirmed - ready for database access',
+      );
+    } catch (authError) {
+      logger.e('🔐 AUTH CHECK: Auth refresh failed', error: authError);
+      // If token refresh fails, try signing out and signing back in
+      try {
+        logger.w('🔐 AUTH CHECK: Attempting auth reset...');
+        await _auth.signOut();
+        final credential = await _auth.signInAnonymously();
+        await credential.user?.getIdToken(true);
+        await _auth.authStateChanges().firstWhere((user) => user != null);
+        logger.i(
+          '🔐 AUTH CHECK: Auth reset successful: ${credential.user?.uid}',
+        );
+      } catch (resetError) {
+        logger.e('🔐 AUTH CHECK: Auth reset also failed', error: resetError);
+        rethrow;
+      }
     }
   }
 
@@ -334,7 +430,14 @@ class RealtimeDatabaseRepository {
       }
       final rawData = event.snapshot.value as Map<Object?, Object?>;
       final data = rawData.map((key, value) => MapEntry(key.toString(), value));
-      return PairingSession.fromMap(data, token);
+
+      try {
+        return PairingSession.fromMap(data, token);
+      } catch (e) {
+        logger.e('Failed to parse session $token from database: $e');
+        // Re-throw as a different error type that the cleanup can handle
+        throw StateError('Session $token is corrupted: $e');
+      }
     });
   }
 
@@ -414,44 +517,39 @@ class RealtimeDatabaseRepository {
     }
   }
 
-  /// Stream of position updates (latest position only).
-  Stream<PositionUpdate> getPositionStream(String sessionToken) {
-    return _db.child('sessions/$sessionToken/latestPosition').onValue.map((
-      event,
-    ) {
-      if (!event.snapshot.exists) {
-        throw StateError('No position found in session $sessionToken');
-      }
-      final rawData = event.snapshot.value as Map<Object?, Object?>;
-      final data = rawData.map((key, value) => MapEntry(key.toString(), value));
-      return PositionUpdate.fromMap(data);
-    });
-  }
+  /// Removes a device from a session.
+  Future<void> removeDeviceFromSession(String token, String deviceId) async {
+    await ensureAuthenticated();
+    logger.i('🔥 RTDB DELETE: Removing device $deviceId from session $token');
 
-  /// Pushes a position update to RTDB (overwrites latestPosition).
-  Future<void> pushPosition(
-    String sessionToken,
-    PositionUpdate position,
-  ) async {
-    logger.i('🔥 RTDB WRITE: Pushing position update to session $sessionToken');
-    logger.i(
-      '🔥 RTDB DETAILS: lat=${position.latitude.toStringAsFixed(6)}, lng=${position.longitude.toStringAsFixed(6)}, accuracy=${position.accuracy?.toStringAsFixed(1)}m',
-    );
     final writeStart = DateTime.now();
     try {
-      await _db
-          .child('sessions/$sessionToken/latestPosition')
-          .set(position.toMap());
+      // Remove device from session's device list
+      await _db.child('sessions/$token/devices/$deviceId').remove();
       final writeDuration = DateTime.now().difference(writeStart);
       logger.i(
-        '✅ RTDB WRITE SUCCESS: Position pushed to $sessionToken in ${writeDuration.inMilliseconds}ms',
+        '✅ RTDB DELETE SUCCESS: Device $deviceId removed from session $token in ${writeDuration.inMilliseconds}ms',
       );
     } catch (e) {
       logger.e(
-        '❌ RTDB WRITE FAILED: Position push failed after ${DateTime.now().difference(writeStart).inMilliseconds}ms',
+        '❌ RTDB DELETE FAILED: Failed to remove device $deviceId from session $token after ${DateTime.now().difference(writeStart).inMilliseconds}ms',
         error: e,
       );
       rethrow;
+    }
+
+    // Also remove the reverse lookup
+    try {
+      await _db.child('deviceSessions/$deviceId').remove();
+      logger.i(
+        '✅ RTDB DELETE SUCCESS: Device session lookup removed for $deviceId',
+      );
+    } catch (e) {
+      logger.w(
+        '⚠️ Failed to remove device session lookup for $deviceId',
+        error: e,
+      );
+      // Don't rethrow - this is not critical
     }
   }
 
@@ -488,14 +586,21 @@ class RealtimeDatabaseRepository {
     logger.i(
       '🔥 RTDB DETAILS: type=${alarm.type}, severity=${alarm.severity}, distance=${alarm.distanceFromAnchor.toStringAsFixed(1)}m',
     );
+    final alarmData = alarm.toMap();
+    final dataSize = _estimateDataSize(alarmData);
+
     final writeStart = DateTime.now();
     try {
       await _db
           .child('sessions/$sessionToken/alarms/${alarm.id}')
-          .set(alarm.toMap());
+          .set(alarmData);
       final writeDuration = DateTime.now().difference(writeStart);
+
+      // Record bandwidth usage
+      _bandwidthTracker?.recordFirebaseDatabaseOperation(bytesSent: dataSize);
+
       logger.i(
-        '✅ RTDB WRITE SUCCESS: Alarm ${alarm.id} created in $sessionToken in ${writeDuration.inMilliseconds}ms',
+        '✅ RTDB WRITE SUCCESS: Alarm ${alarm.id} created in $sessionToken in ${writeDuration.inMilliseconds}ms ($dataSize bytes)',
       );
     } catch (e) {
       logger.e(
@@ -591,12 +696,40 @@ class RealtimeDatabaseRepository {
 
   /// Stream of session data for monitoring (for secondary devices).
   Stream<Map<String, dynamic>> getSessionDataStream(String sessionToken) {
-    return _db.child('sessions/$sessionToken').onValue.map((event) {
+    logger.i(
+      '📡 getSessionDataStream: Setting up stream for session $sessionToken',
+    );
+    final streamRef = _db.child('sessions/$sessionToken');
+    logger.i(
+      '📡 getSessionDataStream: Database reference path: ${streamRef.path}',
+    );
+
+    return streamRef.onValue.map((event) {
+      logger.i(
+        '📡 getSessionDataStream: Received event for session $sessionToken, exists=${event.snapshot.exists}',
+      );
+
       if (!event.snapshot.exists) {
+        logger.e(
+          '📡 getSessionDataStream: Session $sessionToken not found in Firebase',
+        );
         throw StateError('Session $sessionToken not found');
       }
+
       final rawData = event.snapshot.value as Map<Object?, Object?>;
-      return _convertToStringDynamicMap(rawData);
+      logger.i(
+        '📡 getSessionDataStream: Raw data keys: ${rawData.keys.toList()}',
+      );
+
+      final convertedData = _convertToStringDynamicMap(rawData);
+      logger.i(
+        '📡 getSessionDataStream: Converted data keys: ${convertedData.keys.toList()}',
+      );
+      logger.i(
+        '📡 getSessionDataStream: anchor=${convertedData['anchor']}, boatPosition=${convertedData['boatPosition']}, monitoringActive=${convertedData['monitoringActive']}',
+      );
+
+      return convertedData;
     });
   }
 
@@ -622,41 +755,180 @@ class RealtimeDatabaseRepository {
     }
   }
 
-  /// Deletes expired sessions (cleanup).
+  /// Deletes expired and inactive sessions (cleanup).
+  /// Tests basic connectivity to the Firebase Realtime Database
+  Future<bool> testDatabaseConnectivity() async {
+    try {
+      logger.i('🔍 Testing database connectivity...');
+      final rootSnapshot = await _db.get();
+      logger.i(
+        '🔍 Database connectivity test successful, exists: ${rootSnapshot.exists}',
+      );
+      return true;
+    } on FirebaseException catch (e) {
+      logger.e('🔍 Database connectivity test failed', error: e);
+      logger.e('🔍 Error code: ${e.code}, message: ${e.message}');
+      return false;
+    } catch (e) {
+      logger.e('🔍 Unexpected error during connectivity test', error: e);
+      return false;
+    }
+  }
+
+  /// Removes sessions that are:
+  /// 1. Expired (past their expiresAt time)
+  /// 2. Inactive (monitoringActive = false or missing) and older than 24 hours
   Future<void> deleteExpiredSessions() async {
     final now = DateTime.now().millisecondsSinceEpoch;
+    final twentyFourHoursAgo =
+        now - (24 * 60 * 60 * 1000); // 24 hours in milliseconds
+
+    logger.i(
+      '🧹 Starting deleteExpiredSessions - checking database connectivity',
+    );
+
+    // First test basic connectivity
+    final connectivityTest = await testDatabaseConnectivity();
+    if (!connectivityTest) {
+      logger.w(
+        '🧹 Database connectivity test failed, skipping session cleanup',
+      );
+      return;
+    }
+
     try {
+      logger.i(
+        '🧹 Attempting to read sessions from: ${_db.child('sessions').path}',
+      );
       final sessionsSnapshot = await _db.child('sessions').get();
-      if (!sessionsSnapshot.exists) return;
+      logger.i(
+        '🧹 Sessions read successful, exists: ${sessionsSnapshot.exists}',
+      );
+      if (!sessionsSnapshot.exists) {
+        logger.i('🧹 No sessions found to clean up');
+        return;
+      }
 
       final rawSessions = sessionsSnapshot.value as Map<Object?, Object?>;
       final sessions = rawSessions.map(
         (key, value) => MapEntry(key.toString(), value),
       );
-      final expiredTokens = <String>[];
+      final tokensToDelete = <String>[];
 
       for (final entry in sessions.entries) {
-        final rawSessionData = entry.value as Map<Object?, Object?>;
-        final sessionData = rawSessionData.map(
-          (key, value) => MapEntry(key.toString(), value),
-        );
-        final expiresAt = sessionData['expiresAt'] as int;
-        if (expiresAt < now) {
-          expiredTokens.add(entry.key);
+        try {
+          // Skip if entry value is not a map (corrupted data)
+          if (entry.value is! Map) {
+            logger.w(
+              '🗑️ Session ${entry.key} has invalid data type (not a Map), deleting',
+            );
+            tokensToDelete.add(entry.key);
+            continue;
+          }
+
+          final rawSessionData = entry.value as Map<Object?, Object?>;
+          final sessionData = rawSessionData.map(
+            (key, value) => MapEntry(key.toString(), value),
+          );
+
+          final expiresAt = sessionData['expiresAt'];
+          final createdAt = sessionData['createdAt'];
+          final monitoringActive = sessionData['monitoringActive'] as bool?;
+          final isActive = sessionData['isActive'] as bool? ?? true;
+
+          // Check if session is missing required fields (corrupted)
+          final devicesField = sessionData['devices'];
+          final primaryUserIdField = sessionData['primaryUserId'];
+
+          if (expiresAt == null ||
+              createdAt == null ||
+              devicesField == null ||
+              primaryUserIdField == null) {
+            logger.w(
+              '🗑️ Session ${entry.key} is missing required fields '
+              '(devices: ${devicesField != null}, primaryUserId: ${primaryUserIdField != null}, '
+              'createdAt: ${createdAt != null}, expiresAt: ${expiresAt != null}), deleting',
+            );
+            tokensToDelete.add(entry.key);
+            continue;
+          }
+
+          // Convert to int if needed
+          final expiresAtMs = expiresAt is int
+              ? expiresAt
+              : (expiresAt as num?)?.toInt();
+          final createdAtMs = createdAt is int
+              ? createdAt
+              : (createdAt as num?)?.toInt();
+
+          if (expiresAtMs == null || createdAtMs == null) {
+            logger.w(
+              '🗑️ Session ${entry.key} has invalid timestamp types, deleting',
+            );
+            tokensToDelete.add(entry.key);
+            continue;
+          }
+
+          // Check if session is expired
+          if (expiresAtMs < now) {
+            tokensToDelete.add(entry.key);
+            logger.d(
+              '🗑️ Session ${entry.key} is expired (expiresAt: $expiresAtMs, now: $now)',
+            );
+            continue;
+          }
+
+          // Check if session is inactive and older than 24 hours
+          if (createdAtMs < twentyFourHoursAgo) {
+            // Session is older than 24 hours
+            final hasNoMonitoringData = monitoringActive != true;
+            final isInactive = isActive != true;
+
+            if (hasNoMonitoringData || isInactive) {
+              tokensToDelete.add(entry.key);
+              logger.d(
+                '🗑️ Session ${entry.key} is inactive and older than 24 hours '
+                '(createdAt: $createdAtMs, monitoringActive: $monitoringActive, isActive: $isActive)',
+              );
+            }
+          }
+        } catch (e) {
+          // If we can't parse the session, it's corrupted - delete it
+          logger.w(
+            '🗑️ Session ${entry.key} is corrupted (error parsing: $e), deleting',
+          );
+          tokensToDelete.add(entry.key);
         }
       }
 
-      // Delete expired sessions
-      for (final token in expiredTokens) {
-        await _db.child('sessions/$token').remove();
-        logger.i('🗑️ Deleted expired session: $token');
+      // Delete expired/inactive sessions
+      for (final token in tokensToDelete) {
+        try {
+          await _db.child('sessions/$token').remove();
+          logger.i('🗑️ Deleted session: $token');
+        } catch (e) {
+          logger.w('Failed to delete session $token', error: e);
+        }
       }
 
       logger.i(
-        '✅ Cleanup complete: ${expiredTokens.length} expired sessions removed',
+        '✅ Cleanup complete: ${tokensToDelete.length} sessions removed '
+        '(expired or inactive >24h)',
       );
     } catch (e) {
-      logger.w('Could not delete expired sessions', error: e);
+      logger.w('Could not delete expired/inactive sessions', error: e);
+
+      // Provide more specific error information
+      if (e.toString().contains('permission-denied')) {
+        logger.e('🔐 PERMISSION ERROR: Cannot access sessions path');
+        logger.e('🔐 Current user: ${getCurrentUserId() ?? "null"}');
+        logger.e(
+          '🔐 Database URL: ${DefaultFirebaseOptions.currentPlatform.databaseURL}',
+        );
+        logger.e(
+          '🔐 Check Firebase Realtime Database rules and ensure user is authenticated',
+        );
+      }
     }
   }
 
@@ -673,6 +945,13 @@ class RealtimeDatabaseRepository {
   Future<void> signInAnonymously() async {
     try {
       await _auth.signInAnonymously();
+
+      // Record bandwidth usage for auth operation (estimated ~1KB for request/response)
+      _bandwidthTracker?.recordFirebaseAuthOperation(
+        bytesSent: 512,
+        bytesReceived: 512,
+      );
+
       logger.i('✅ Signed in anonymously for RTDB access');
     } catch (e) {
       logger.e('❌ Failed to sign in anonymously', error: e);

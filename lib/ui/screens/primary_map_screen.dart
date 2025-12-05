@@ -39,8 +39,6 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
   List<LatLng>? _cachedPolygonPoints;
   LatLng? _cachedPolygonCenter;
   double? _cachedPolygonRadius;
-  List<PositionHistoryPoint>? _positionHistoryCache;
-  Anchor? _previousAnchor;
   final Set<String> _shownWarningIds = {}; // Track which warnings have been shown
   bool _positionMonitoringStarted = false;
   bool _isInfoCardExpanded = true; // Track if info card is expanded
@@ -68,12 +66,14 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
     }
   }
 
+
   @override
   Widget build(BuildContext context) {
     // Optimize provider watches - only watch what changes frequently
     final anchor = ref.watch(anchorProvider);
     final position = ref.watch(positionProvider);
-    final alarms = ref.watch(activeAlarmsProvider) ?? [];
+    final positionHistory = ref.watch(positionHistoryProvider);
+    final alarms = ref.watch(activeAlarmsProvider) ;
     final settings = ref.watch(settingsProvider);
     final isMonitoring = ref.read(activeAlarmsProvider.notifier).isMonitoring;
 
@@ -144,7 +144,7 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
       appBar: _buildAppBar(),
       body: shouldShowLoading
           ? _buildLoadingState()
-          : _buildMapStack(anchor, position, displayAnchorPosition, activeAlarms, settings, isMonitoring, isOffline, centerPoint),
+          : _buildMapStack(anchor, position, displayAnchorPosition, positionHistory, activeAlarms, settings, isMonitoring, isOffline, centerPoint),
     );
   }
 
@@ -182,29 +182,26 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
   }
 
   Widget _buildMapStack(Anchor? anchor, PositionUpdate? position,
-      LatLng? displayAnchorPosition, List<AlarmEvent> activeAlarms, AppSettings settings, bool isMonitoring, bool isOffline, LatLng centerPoint) {
+      LatLng? displayAnchorPosition, List<PositionHistoryPoint> positionHistory, List<AlarmEvent> activeAlarms, AppSettings settings, bool isMonitoring, bool isOffline, LatLng centerPoint) {
     // Use current slider value during dragging for real-time circle updates
     final currentRadius = _isDraggingRadius ? _sliderRadiusValue : null;
 
-    // Calculate zoom level
-    double zoomLevel = 18.0;
+    // Calculate effective radius for display (accounting for sensitivity like alarm logic)
+    double? displayRadius;
     if (anchor != null) {
-      final effectiveRadius = currentRadius ?? anchor.radius;
-      zoomLevel = calculateZoomForRadius(effectiveRadius);
+      final baseRadius = currentRadius ?? anchor.radius;
+      // Apply same sensitivity calculation as alarm service
+      const double maxSensitivityReduction = 0.2; // Maximum 20% reduction in radius
+      final sensitivityMultiplier = settings.alarmSensitivity.clamp(0.0, 1.0) * maxSensitivityReduction;
+      displayRadius = baseRadius * (1.0 - sensitivityMultiplier);
     }
 
-    // Get position history only when needed (not on every rebuild)
-    final positionHistory = _positionHistoryCache ?? ref.read(positionHistoryProvider) ?? [];
-    if (_positionHistoryCache == null) {
-      // Cache it to avoid frequent reads
-      _positionHistoryCache = positionHistory;
-      // Reset cache after a delay to allow updates
-      Future.delayed(const Duration(seconds: 10), () {
-        if (mounted) {
-          _positionHistoryCache = null;
-        }
-      });
+    // Calculate zoom level
+    double zoomLevel = 18.0;
+    if (anchor != null && displayRadius != null) {
+      zoomLevel = calculateZoomForRadius(displayRadius);
     }
+
 
     return Stack(
       children: [
@@ -214,9 +211,13 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
           options: MapOptions(
             initialCenter: centerPoint,
             initialZoom: zoomLevel,
-            maxZoom: 19.0,
+            maxZoom: 22.0,
             minZoom: 5.0,
-            // Remove onMapReady callback that might cause issues
+            // Disable rotation to keep north "up"
+            interactionOptions: InteractionOptions(
+              flags: InteractiveFlag.drag | InteractiveFlag.pinchZoom | InteractiveFlag.doubleTapZoom,
+              // Exclude rotate to prevent map rotation
+            ),
           ),
           children: [
             TileLayer(
@@ -235,11 +236,11 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
                 ],
               ),
             // Anchor radius circle
-            if (anchor != null && displayAnchorPosition != null)
+            if (anchor != null && displayAnchorPosition != null && displayRadius != null)
               PolygonLayer(
                 polygons: [
                   Polygon(
-                    points: _getAnchorRadiusPolygonPoints(displayAnchorPosition, currentRadius ?? anchor.radius),
+                    points: _getAnchorRadiusPolygonPoints(displayAnchorPosition, displayRadius),
                     color: getAnchorCircleColor(anchor, position, context, currentRadius: currentRadius).withValues(alpha: 0.2),
                     borderColor: getAnchorCircleColor(anchor, position, context, currentRadius: currentRadius),
                     borderStrokeWidth: 2.0,
@@ -604,13 +605,6 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                   ),
-                  Text(
-                    'Accuracy: ${position.accuracy != null ? formatDistance(position.accuracy!, settings.unitSystem) : 'Unknown'}',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ),
                 ] else ...[
                   Text(
                     'Waiting for GPS signal...',
@@ -666,7 +660,24 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
-                onPressed: () => ref.read(activeAlarmsProvider.notifier).startMonitoring(),
+                onPressed: () async {
+                  logger.i('🔄 USER ACTION: Restart Monitoring button pressed');
+                  try {
+                    await ref.read(activeAlarmsProvider.notifier).startMonitoringAsync();
+                    logger.i('✅ USER ACTION: Restart Monitoring completed successfully');
+                  } catch (e) {
+                    logger.e('❌ USER ACTION: Restart Monitoring failed', error: e);
+                    // Show error to user if needed
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Failed to restart monitoring: $e'),
+                          backgroundColor: Colors.red,
+                        ),
+                      );
+                    }
+                  }
+                },
                 icon: const Icon(Icons.play_arrow),
                 label: const Text('Restart Monitoring'),
                 style: ElevatedButton.styleFrom(
@@ -690,7 +701,7 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    'Anchor Radius: ${formatDistance(anchor.radius, ref.watch(settingsProvider).unitSystem)}',
+                    'Anchor Radius: ${formatDistance(_isDraggingRadius ? _sliderRadiusValue : anchor.radius, ref.watch(settingsProvider).unitSystem)}',
                     style: const TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 16,
@@ -910,3 +921,4 @@ class _PrimaryMapScreenState extends ConsumerState<PrimaryMapScreen> {
     }
   }
 }
+

@@ -44,15 +44,6 @@ class AlarmService {
       return null;
     }
 
-    // Check GPS accuracy - ignore positions that are too inaccurate
-    if (position.accuracy == null ||
-        position.accuracy! > settings.gpsAccuracyThreshold) {
-      logger.d(
-        'Ignoring position due to poor GPS accuracy: ${position.accuracy}m > ${settings.gpsAccuracyThreshold}m',
-      );
-      return null;
-    }
-
     final distance = calculateDistance(
       anchor.latitude,
       anchor.longitude,
@@ -67,7 +58,7 @@ class AlarmService {
     }
 
     logger.d(
-      'Calculated drift distance: ${distance.toStringAsFixed(1)}m from anchor (accuracy: ${position.accuracy}m)',
+      'Calculated drift distance: ${distance.toStringAsFixed(1)}m from anchor',
     );
     return distance;
   }
@@ -194,12 +185,6 @@ class AlarmService {
         const Duration(seconds: 30); // 30 second timeout
   }
 
-  /// Checks if a position has poor GPS accuracy that should trigger warnings.
-  /// Returns true if position accuracy exceeds the configured threshold.
-  bool isGpsInaccurate(PositionUpdate position) {
-    return position.accuracy != null &&
-        position.accuracy! > settings.gpsAccuracyThreshold;
-  }
 
   /// Generates a unique alarm ID using UUID for guaranteed uniqueness.
   String _generateAlarmId() {

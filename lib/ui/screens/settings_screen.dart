@@ -2,8 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../../providers/settings_provider.dart';
-import '../../providers/pairing_providers.dart';
+import '../../providers/pairing/pairing_providers.dart';
 import '../../providers/secondary_session_monitor_provider.dart';
+import '../../providers/secondary_auto_disconnect_provider.dart';
 import '../../providers/anchor_provider.dart';
 import '../../providers/service_providers.dart';
 import '../../models/device_info.dart';
@@ -668,7 +669,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final sessionAsync = ref.watch(secondarySessionMonitorProvider);
     final session = sessionAsync.value;
 
-    // If session is inactive or doesn't exist, show disconnect option
+    // Auto-disconnect provider handles disconnection automatically
+    // Just watch it to ensure it's active
+    ref.watch(secondaryAutoDisconnectProvider);
+
+    // If session is inactive or doesn't exist, show informational message
+    // (auto-disconnect will handle clearing the state)
     if (session == null || !session.isActive) {
       return Card(
         margin: const EdgeInsets.all(16),
@@ -689,38 +695,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
               const SizedBox(height: 12),
               const Text(
-                'The pairing session has been ended by the primary device. You are no longer monitoring the anchor alarm.',
+                'The pairing session has been ended by the primary device or no longer exists. Returning to primary mode...',
                 style: TextStyle(fontSize: 14, color: Colors.grey),
-              ),
-              const SizedBox(height: 16),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  try {
-                    await sessionNotifier.disconnect();
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Disconnected from paired session.'),
-                          backgroundColor: Colors.green,
-                        ),
-                      );
-                    }
-                  } catch (e) {
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Failed to disconnect: $e'),
-                          backgroundColor: Colors.red,
-                        ),
-                      );
-                    }
-                  }
-                },
-                icon: const Icon(Icons.close),
-                label: const Text('Close'),
-                style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                ),
               ),
             ],
           ),
