@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../services/notification_service.dart';
 import '../services/permission_service.dart';
 import '../services/session_sync_service.dart';
+import '../services/bandwidth_tracker.dart';
 import '../repositories/local_storage_repository.dart';
 import '../repositories/realtime_database_repository.dart';
 import '../utils/logger_setup.dart';
@@ -43,10 +44,11 @@ final permissionServiceProvider = Provider<PermissionService>((ref) {
 final realtimeDatabaseRepositoryProvider = Provider<RealtimeDatabaseRepository>((ref) {
   try {
     final auth = ref.read(firebaseAuthProvider);
-    logger.i('Creating RealtimeDatabaseRepository with auth instance');
+    final bandwidthTracker = ref.read(bandwidthTrackerProvider);
+    logger.i('Creating RealtimeDatabaseRepository with auth and bandwidth tracking');
 
-    final repo = RealtimeDatabaseRepository(auth: auth);
-    repo.init(); // Initialize with offline persistence
+    final repo = RealtimeDatabaseRepository(auth: auth, bandwidthTracker: bandwidthTracker);
+    // Persistence is now set up in constructor
 
     logger.i('RealtimeDatabaseRepository created successfully');
     return repo;
@@ -54,7 +56,7 @@ final realtimeDatabaseRepositoryProvider = Provider<RealtimeDatabaseRepository>(
     logger.e('Failed to create RealtimeDatabaseRepository', error: e, stackTrace: stack);
     // Return a repository with default auth as fallback
     final fallbackRepo = RealtimeDatabaseRepository();
-    fallbackRepo.init();
+    // Persistence is now set up in constructor
     logger.w('Using fallback RealtimeDatabaseRepository without explicit auth');
     return fallbackRepo;
   }
@@ -78,4 +80,16 @@ final connectivityProvider = StreamProvider<List<ConnectivityResult>>((ref) asyn
   await for (final result in connectivity.onConnectivityChanged) {
     yield result;
   }
+});
+
+/// Provides bandwidth tracking service for monitoring data usage.
+final bandwidthTrackerProvider = Provider<BandwidthTracker>((ref) {
+  final tracker = BandwidthTracker();
+
+  // Dispose on provider disposal
+  ref.onDispose(() {
+    tracker.dispose();
+  });
+
+  return tracker;
 });

@@ -92,6 +92,7 @@ app.*.map.json
 # Firebase
 **/ios/Runner/GoogleService-Info.plist
 **/android/app/google-services.json
+lib/firebase_options.dart
 
 # Exceptions to above rules.
 !**/ios/Pods/Manifest.lock

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../providers/pairing_providers.dart';
+import '../../providers/pairing/pairing_providers.dart';
 import '../../models/pairing_session.dart';
 import '../../utils/logger_setup.dart';
 import 'pairing_scan_screen.dart';

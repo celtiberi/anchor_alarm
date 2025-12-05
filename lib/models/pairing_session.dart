@@ -37,21 +37,72 @@ class PairingSession {
   /// Creates PairingSession from RTDB map.
   factory PairingSession.fromMap(Map<String, dynamic> data, String token) {
     // Handle the devices map which comes as Map<Object?, Object?> from Firebase
-    final rawDevices = data['devices'] as Map<Object?, Object?>;
-    final devicesMap = rawDevices.map((key, value) => MapEntry(key.toString(), value));
+    final rawDevices = data['devices'];
+    if (rawDevices == null) {
+      throw StateError(
+        'Session $token is missing required "devices" field. Session may be corrupted or incomplete.',
+      );
+    }
+    
+    if (rawDevices is! Map) {
+      throw StateError(
+        'Session $token has invalid "devices" field type. Expected Map, got ${rawDevices.runtimeType}.',
+      );
+    }
+    
+    final devicesMap = (rawDevices as Map<Object?, Object?>).map(
+      (key, value) => MapEntry(key.toString(), value),
+    );
+
+    final primaryUserId = data['primaryUserId'] as String?;
+    if (primaryUserId == null) {
+      throw StateError(
+        'Session $token is missing required "primaryUserId" field. Session may be corrupted or incomplete.',
+      );
+    }
+
+    final createdAt = data['createdAt'];
+    if (createdAt == null) {
+      throw StateError(
+        'Session $token is missing required "createdAt" field. Session may be corrupted or incomplete.',
+      );
+    }
+
+    final expiresAt = data['expiresAt'];
+    if (expiresAt == null) {
+      throw StateError(
+        'Session $token is missing required "expiresAt" field. Session may be corrupted or incomplete.',
+      );
+    }
 
     return PairingSession(
       token: token,
-      primaryUserId: data['primaryUserId'] as String,
+      primaryUserId: primaryUserId,
       devices: devicesMap.values
           .map((d) {
+            if (d == null) {
+              throw StateError(
+                'Session $token has null device entry. Session may be corrupted.',
+              );
+            }
+            if (d is! Map) {
+              throw StateError(
+                'Session $token has invalid device entry type. Expected Map, got ${d.runtimeType}.',
+              );
+            }
             final rawDevice = d as Map<Object?, Object?>;
-            final deviceData = rawDevice.map((key, value) => MapEntry(key.toString(), value));
+            final deviceData = rawDevice.map(
+              (key, value) => MapEntry(key.toString(), value),
+            );
             return DeviceInfo.fromMap(deviceData);
           })
           .toList(),
-      createdAt: DateTime.fromMillisecondsSinceEpoch((data['createdAt'] as int)),
-      expiresAt: DateTime.fromMillisecondsSinceEpoch((data['expiresAt'] as int)),
+      createdAt: DateTime.fromMillisecondsSinceEpoch(
+        createdAt is int ? createdAt : (createdAt as num).toInt(),
+      ),
+      expiresAt: DateTime.fromMillisecondsSinceEpoch(
+        expiresAt is int ? expiresAt : (expiresAt as num).toInt(),
+      ),
       isActive: data['isActive'] as bool? ?? true,
     );
   }

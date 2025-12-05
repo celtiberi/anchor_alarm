@@ -309,14 +309,10 @@ class SessionSyncService {
       logger.i(
         '🔄 Sending position update to Firebase: lat=${position.latitude}, lon=${position.longitude}',
       );
-      await _realtimeDb.pushPosition(sessionToken, position);
-      logger.d('✅ Position pushed to history');
 
       final positionData = {
         'lat': position.latitude,
         'lon': position.longitude,
-        'speed': position.speed,
-        'accuracy': position.accuracy,
         'timestamp': position.timestamp.toIso8601String(),
       };
 
@@ -385,14 +381,10 @@ class SessionSyncService {
           logger.i(
             '🔄 Sending position update to Firebase: lat=${_pendingPosition!.latitude}, lon=${_pendingPosition!.longitude}',
           );
-          await _realtimeDb.pushPosition(sessionToken, _pendingPosition!);
-          logger.d('✅ Position pushed to history');
 
           final positionData = {
             'lat': _pendingPosition!.latitude,
             'lon': _pendingPosition!.longitude,
-            'speed': _pendingPosition!.speed,
-            'accuracy': _pendingPosition!.accuracy,
             'timestamp': _pendingPosition!.timestamp.toIso8601String(),
           };
 

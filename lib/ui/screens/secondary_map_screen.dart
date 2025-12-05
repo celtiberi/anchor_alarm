@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import '../../providers/settings_provider.dart';
-import '../../providers/pairing_providers.dart';
+import '../../providers/pairing/pairing_providers.dart';
 import '../../providers/remote_data_providers.dart';
 import '../../providers/local_alarm_dismissal_provider.dart';
 import '../../providers/service_providers.dart';
@@ -100,11 +100,25 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
       }
     });
 
+    // Watch remoteSessionDataProvider directly to ensure it stays alive
+    final sessionDataAsync = ref.watch(remoteSessionDataProvider);
+    logger.d(
+      'Secondary map: sessionDataAsync state=${sessionDataAsync.runtimeType}, hasValue=${sessionDataAsync.hasValue}, hasError=${sessionDataAsync.hasError}',
+    );
+    if (sessionDataAsync.hasValue) {
+      logger.i(
+        'Secondary map: sessionData keys=${sessionDataAsync.value?.keys.toList() ?? []}',
+      );
+    }
+
     final anchorAsync = ref.watch(remoteAnchorProvider);
     final positionAsync = ref.watch(remotePositionProvider);
     final positionHistory = ref.watch(secondaryPositionHistoryProvider);
     final alarmsAsync = ref.watch(remoteAlarmProvider);
     final settings = ref.watch(settingsProvider);
+
+    // Initialize secondary alarm notifications (watches remote alarms and triggers local notifications)
+    ref.watch(secondaryAlarmNotificationProvider);
 
     // Extract values from async results
     final anchor = anchorAsync.value;
@@ -250,7 +264,7 @@ class _SecondaryMapScreenState extends ConsumerState<SecondaryMapScreen> {
           options: MapOptions(
             initialCenter: centerPoint,
             initialZoom: zoomLevel,
-            maxZoom: 19.0,
+            maxZoom: 22.0,
             minZoom: 5.0,
             onMapReady: () {
               // Initial map setup

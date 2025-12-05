@@ -4,10 +4,11 @@ import '../models/position_update.dart';
 import '../models/alarm_event.dart';
 import '../models/position_history_point.dart';
 import 'package:latlong2/latlong.dart';
-import 'pairing_providers.dart';
+import 'pairing/pairing_providers.dart';
 import 'service_providers.dart';
 import '../utils/logger_setup.dart';
 import 'local_alarm_dismissal_provider.dart';
+import 'settings_provider.dart';
 
 /// Helper method to parse timestamps that might be stored as different types in RTDB
 int _parseTimestamp(dynamic value) {
@@ -30,18 +31,83 @@ final remoteSessionDataProvider =
     StreamProvider.autoDispose<Map<String, dynamic>>((ref) async* {
       final pairingState = ref.watch(pairingSessionStateProvider);
 
+      logger.i(
+        '📡 Remote session data provider: role=${pairingState.role}, isSecondary=${pairingState.isSecondary}, sessionToken=${pairingState.sessionToken}',
+      );
+
       if (!pairingState.isSecondary || pairingState.sessionToken == null) {
+        logger.d('📡 Remote session data: Not secondary or no session token, yielding empty');
         yield {};
         return;
       }
 
+      logger.i(
+        '📡 Remote session data: Starting stream for session ${pairingState.sessionToken}',
+      );
       final realtimeDb = ref.read(realtimeDatabaseRepositoryProvider);
+      
+      try {
       yield* realtimeDb
           .getSessionDataStream(pairingState.sessionToken!)
-          .handleError((error) {
-            logger.e('Error in remote session data stream', error: error);
+            .map((data) {
+              logger.i(
+                '📡 Remote session data: Received update - keys=${data.keys.toList()}, data=$data',
+              );
+              logger.i(
+                '📡 Remote session data: anchor=${data['anchor']}, boatPosition=${data['boatPosition']}, monitoringActive=${data['monitoringActive']}',
+              );
+              return data;
+            })
+            .handleError((error, stackTrace) {
+              logger.e(
+                'Error in remote session data stream',
+                error: error,
+                stackTrace: stackTrace,
+              );
+              
+              // Auto-disconnect if session not found or corrupted
+              if (error is StateError &&
+                  (error.message.contains('not found') || error.message.contains('corrupted'))) {
+                logger.w('⚠️ Session ${error.message.contains('not found') ? 'not found' : 'corrupted'} - auto-disconnecting secondary device');
+
+                if (error.message.contains('corrupted')) {
+                  // Stop session sync service immediately
+                  ref.invalidate(pairingSyncProvider);
+                  logger.i('🛑 Stopped session sync service for corrupted session');
+
+                  // Delete corrupted session
+                  Future.microtask(() async {
+                    try {
+                      await realtimeDb.deleteSession(pairingState.sessionToken!);
+                      logger.i('✅ Deleted corrupted session: ${pairingState.sessionToken}');
+                    } catch (e) {
+                      logger.e('Failed to delete corrupted session', error: e);
+                    }
+                  });
+                }
+
+                // Use Future.microtask to avoid circular dependency
+                Future.microtask(() async {
+                  try {
+                    final sessionNotifier = ref.read(pairingSessionStateProvider.notifier);
+                    await sessionNotifier.disconnect();
+                    logger.i('✅ Auto-disconnected from ${error.message.contains('not found') ? 'missing' : 'corrupted'} session');
+                  } catch (e) {
+                    logger.e('Failed to auto-disconnect', error: e);
+                  }
+                });
+              }
+              
             return {};
           });
+      } catch (e, stackTrace) {
+        logger.e(
+          'Failed to start remote session data stream',
+          error: e,
+          stackTrace: stackTrace,
+        );
+        yield {};
+      }
     });
 
 // Remote anchor provider (derived from central stream)
@@ -135,8 +201,13 @@ final remoteMonitoringStatusProvider = Provider.autoDispose<AsyncValue<bool>>((
   return ref
       .watch(remoteSessionDataProvider)
       .when(
-        data: (data) =>
-            AsyncValue.data(data['monitoringActive'] as bool? ?? false),
+        data: (data) {
+          final monitoringActive = data['monitoringActive'] as bool? ?? false;
+          logger.d(
+            '📊 Remote monitoring status: data keys=${data.keys.toList()}, monitoringActive=$monitoringActive',
+          );
+          return AsyncValue.data(monitoringActive);
+        },
         error: (error, stack) => AsyncValue.error(error, stack),
         loading: () => const AsyncValue.loading(),
       );
@@ -198,7 +269,7 @@ class SecondaryPositionHistoryNotifier
 }
 
 // Remote alarms provider (separate stream for alarms)
-final remoteAlarmProvider = StreamProvider.autoDispose<List<AlarmEvent>>((
+final remoteAlarmProvider = StreamProvider<List<AlarmEvent>>((
   ref,
 ) async* {
   final pairingState = ref.watch(pairingSessionStateProvider);
@@ -210,15 +281,61 @@ final remoteAlarmProvider = StreamProvider.autoDispose<List<AlarmEvent>>((
   }
 
   final realtimeDb = ref.read(realtimeDatabaseRepositoryProvider);
+  logger.i('🔄 Secondary device starting remote alarm stream for session: ${pairingState.sessionToken}');
+
   yield* realtimeDb
       .getAlarmsStream(pairingState.sessionToken!)
       .map((alarms) {
-        return alarms
+        final filteredAlarms = alarms
             .where((alarm) => !localDismissals.contains(alarm.id))
             .toList();
+        logger.i('📡 Remote alarms update: ${alarms.length} total, ${filteredAlarms.length} after filtering, local dismissals: ${localDismissals.length}');
+        logger.d('📡 Alarm IDs in stream: ${alarms.map((a) => a.id).toList()}');
+        logger.d('📡 Filtered alarm IDs: ${filteredAlarms.map((a) => a.id).toList()}');
+        return filteredAlarms;
       })
       .handleError((error) {
         logger.e('Error in remote alarms stream', error: error);
         return [];
       });
 });
+
+/// Provider that tracks previously seen alarm IDs for secondary devices.
+/// Used to detect when alarms are cleared remotely.
+
+/// Provider that handles alarm notifications for secondary devices.
+/// Listens to remote alarms and triggers local notifications when alarms are present.
+/// This is a simplified approach that triggers notifications for all active alarms
+/// rather than trying to track "new" vs "existing" alarms, since notification
+/// services are typically idempotent.
+final secondaryAlarmNotificationProvider = Provider.autoDispose<void>((ref) {
+  final pairingState = ref.watch(pairingSessionStateProvider);
+  final alarmsAsync = ref.watch(remoteAlarmProvider);
+  final settings = ref.watch(settingsProvider);
+
+  // Only handle notifications for secondary devices
+  if (!pairingState.isSecondary) {
+    return;
+  }
+
+  final alarms = alarmsAsync.value ?? [];
+  final notificationService = ref.read(notificationServiceProvider);
+
+  if (alarms.isNotEmpty) {
+    // Trigger notifications for all active alarms
+    // The notification service should handle duplicates gracefully
+    for (final alarm in alarms) {
+      logger.i('📢 Secondary device triggering notification for remote alarm: ${alarm.type} (${alarm.id})');
+      try {
+        notificationService.triggerAlarm(alarm, settings);
+      } catch (e) {
+        logger.e('Failed to trigger notification for remote alarm ${alarm.id}', error: e);
+      }
+    }
+  } else {
+    // No active alarms - stop any ongoing notifications
+    logger.i('🔕 Stopping alarm notifications - no active remote alarms');
+    notificationService.stopAlarm();
+  }
+});
+

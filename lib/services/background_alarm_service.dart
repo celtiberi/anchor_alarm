@@ -16,6 +16,7 @@ import '../models/app_settings.dart';
 
 class BackgroundAlarmService {
   bool _isMonitoring = false;
+  bool _isInitialized = false; // Track initialization state
   final LocalStorageRepository _repository = LocalStorageRepository();
   AlarmService? _alarmService;
   PositionUpdate?
@@ -33,6 +34,11 @@ class BackgroundAlarmService {
 
   /// Initializes background geolocation with optimal settings for anchor monitoring.
   Future<void> initialize() async {
+    if (_isInitialized) {
+      logger.d('Background service already initialized, skipping');
+      return;
+    }
+
     // Initialize repository for background access
     await _repository.initialize();
 
@@ -85,6 +91,7 @@ class BackgroundAlarmService {
     // Set up event handlers
     _setupEventHandlers();
 
+    _isInitialized = true;
     logger.i('Background geolocation initialized for anchor alarm monitoring');
   }
 
@@ -140,7 +147,10 @@ class BackgroundAlarmService {
       return;
     }
 
+    // Ensure initialized before starting monitoring
+    if (!_isInitialized) {
     await initialize();
+    }
 
     // Add geofence around anchor position
     await bg.BackgroundGeolocation.addGeofence(
@@ -209,6 +219,7 @@ class BackgroundAlarmService {
   void dispose() {
     stopMonitoring();
     bg.BackgroundGeolocation.removeListeners();
+    _isInitialized = false; // Reset initialization state
   }
 
   /// Handles location updates from background geolocation.
@@ -223,10 +234,6 @@ class BackgroundAlarmService {
         timestamp: DateTime.parse(location.timestamp),
         latitude: location.coords.latitude,
         longitude: location.coords.longitude,
-        accuracy: location.coords.accuracy,
-        speed: location.coords.speed,
-        altitude: location.coords.altitude,
-        heading: location.coords.heading == -1 ? null : location.coords.heading,
       );
 
       // Store as last known position for immediate geofence alarms
@@ -287,12 +294,6 @@ class BackgroundAlarmService {
                   timestamp: DateTime.parse(location.timestamp),
                   latitude: location.coords.latitude,
                   longitude: location.coords.longitude,
-                  accuracy: location.coords.accuracy,
-                  speed: location.coords.speed,
-                  altitude: location.coords.altitude,
-                  heading: location.coords.heading == -1
-                      ? null
-                      : location.coords.heading,
                 );
 
                 final distance = _alarmService!.checkDrift(anchor, position);
